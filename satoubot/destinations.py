@@ -1,6 +1,7 @@
 from telegram import InlineKeyboardButton as Button, InlineKeyboardMarkup as Markup
 from telegram.error import TelegramError
 from telethon.utils import get_peer_id
+from .menu import navigation
 
 
 class DestinationFunctions:
@@ -23,6 +24,7 @@ class DestinationFunctions:
         except Exception:
             await context.bot.send_message(self.admin_id,'Could not list your channels. Check the user session and try again.');return
         rows.append([Button('Cancel',callback_data='destcancel')])
+        rows.append(navigation())
         await context.bot.send_message(self.admin_id,'Select a channel or group you own. Only chats where the bot is an administrator are listed. Add the bot as admin and retry if yours is missing.',reply_markup=Markup(rows))
 
     async def select_destination(self, update, context):

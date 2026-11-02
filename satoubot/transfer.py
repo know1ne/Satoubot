@@ -6,6 +6,7 @@ from pathlib import Path
 from urllib.parse import unquote, urlparse
 
 import httpx
+from .public_transport import PublicTransport
 
 MAX_BYTES = 2_000_000_000
 
@@ -27,7 +28,7 @@ def readable_speed(size, elapsed):
 async def inspect_url(url, headers=None):
     if urlparse(url).scheme not in ('http', 'https'):
         raise ValueError('Only HTTP and HTTPS URLs are supported here.')
-    async with httpx.AsyncClient(follow_redirects=True, timeout=30) as client:
+    async with httpx.AsyncClient(transport=PublicTransport(), follow_redirects=True, max_redirects=5, timeout=30, trust_env=False) as client:
         response = await client.head(url, headers={**(headers or {}), 'Accept-Encoding': 'identity'})
         response.raise_for_status()
         length = response.headers.get('content-length')
@@ -44,7 +45,7 @@ async def download_sequential(url, destination: Path, expected_size: int, progre
     total = 0
     started = time.monotonic()
     try:
-        async with httpx.AsyncClient(follow_redirects=True, timeout=httpx.Timeout(60, connect=30)) as client:
+        async with httpx.AsyncClient(transport=PublicTransport(), follow_redirects=True, max_redirects=5, timeout=httpx.Timeout(60, connect=30), trust_env=False) as client:
             async with client.stream('GET', url, headers={**(headers or {}), 'Accept-Encoding': 'identity'}) as response:
                 response.raise_for_status()
                 with temporary.open('wb') as output:
@@ -71,7 +72,7 @@ async def download(url, destination: Path, expected_size: int, progress, connect
     if expected_size < 4 * 1024 * 1024 or connections < 2:
         return await download_sequential(url, destination, expected_size, progress, headers=headers)
     headers = {**(headers or {}), 'Accept-Encoding': 'identity'}
-    async with httpx.AsyncClient(follow_redirects=True, timeout=httpx.Timeout(60, connect=30)) as client:
+    async with httpx.AsyncClient(transport=PublicTransport(), follow_redirects=True, max_redirects=5, timeout=httpx.Timeout(60, connect=30), trust_env=False) as client:
         head = await client.head(url, headers=headers)
         head.raise_for_status()
         validator = head.headers.get('etag') or head.headers.get('last-modified')

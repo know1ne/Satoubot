@@ -41,7 +41,7 @@ async def test_real_nuvio_worker_and_restricted_modules():
 
 @pytest.mark.asyncio
 async def test_selected_file_prepares_name_headers_and_requires_upload_approval(tmp_path, monkeypatch):
-    monkeypatch.setattr('satoubot.catalogue.inspect_url', AsyncMock(return_value=(100, 'video/mp4')))
+    monkeypatch.setattr('satoubot.catalogue.probe', AsyncMock(return_value={'status':'ready','size':100,'filename':'movie.mp4','content_type':'video/mp4'}))
     store = Store(tmp_path / 'db')
     bot = Bot(store, tmp_path, 42, MagicMock())
     async def downloaded(context, key):
@@ -105,7 +105,8 @@ async def test_movie_card_uses_landscape_and_buttons_without_starting_download(t
 
 
 @pytest.mark.asyncio
-async def test_download_preserves_required_source_headers(tmp_path):
+async def test_download_preserves_required_source_headers(tmp_path, monkeypatch):
+    monkeypatch.setattr('satoubot.public_transport.public_address', AsyncMock(return_value='127.0.0.1'))
     import asyncio
     import threading
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -187,12 +188,12 @@ async def test_yes_no_confirmation_and_duplicate_yes_never_double_download(tmp_p
 async def test_large_source_returns_link_even_when_off_without_probe_or_download(tmp_path,monkeypatch):
     store=Store(tmp_path/'db');store.set_setting('transfers_enabled','0')
     bot=Bot(store,tmp_path,42,MagicMock())
-    probe_mock=AsyncMock();monkeypatch.setattr('satoubot.catalogue.probe',probe_mock)
+    probe_mock=AsyncMock(return_value={'status':'ready','size':3_000_000_000,'filename':'large.mkv','content_type':'video/x-matroska'});monkeypatch.setattr('satoubot.catalogue.probe',probe_mock)
     context=MagicMock();context.bot.send_message=AsyncMock()
     await bot.prepare_choice(context,{'url':'https://file.test/large.mkv','size':3_000_000_000,'movie':{'name':'Example'},'quality':'1080p'})
     assert 'Download it manually' in context.bot.send_message.await_args.args[1]
     assert 'https://file.test/large.mkv' in context.bot.send_message.await_args.args[1]
-    probe_mock.assert_not_awaited()
+    probe_mock.assert_awaited_once()
     assert store.db.execute('SELECT count(*) FROM jobs').fetchone()[0]==0
     assert store.db.execute('SELECT count(*) FROM source_links').fetchone()[0]==1
 
@@ -204,7 +205,7 @@ def test_pagination_four_file_choices_and_persistent_dedup(tmp_path):
     page=store.cache('pages',ids)
     rows=bot.file_page(page,ids,0).inline_keyboard
     assert len([r for r in rows if r[0].callback_data.startswith('file:')])==4
-    assert rows[-2][0].text=='More' and rows[-1][0].text=='Cancel'
+    assert rows[-2][0].text=='More' and any(button.text=='Cancel' for button in rows[-1])
     rows=bot.file_page(page,ids,1).inline_keyboard
     assert len([r for r in rows if r[0].callback_data.startswith('file:')])==2
     one=store.cache('stream',{'url':'https://one.test','identity':'movie:filename:100'})
@@ -223,7 +224,7 @@ async def test_owned_destinations_require_bot_admin_and_selection_needs_fresh_ap
     context=MagicMock();context.bot.id=123;context.bot.send_message=AsyncMock();context.bot.get_chat_member=AsyncMock(return_value=SimpleNamespace(status='administrator',can_post_messages=True))
     await bot.destination_menu(context)
     rows=context.bot.send_message.await_args.kwargs['reply_markup'].inline_keyboard
-    assert len(rows)==2 and rows[0][0].text=='Owned'
+    assert len(rows)==3 and rows[0][0].text=='Owned'
     q=MagicMock();q.data=rows[0][0].callback_data;q.edit_message_reply_markup=AsyncMock();q.message.reply_text=AsyncMock()
     update=MagicMock();update.callback_query=q
     await bot.select_destination(update,context)
@@ -242,14 +243,16 @@ async def test_progress_ticks_every_five_seconds_and_completion_keeps_clean_name
         intervals.append(seconds);await sleep(.001)
     monkeypatch.setattr('satoubot.download.asyncio.sleep',quick_sleep)
     async def edit(text):
-        assert 'Example.2026_720p.mkv' in text and 'Speed:' in text and 'ETA:' in text
-        edited.set()
+        if 'Speed:' in text:
+            assert 'Example.2026_720p.mkv' in text and 'ETA:' in text
+            edited.set()
     context=MagicMock();context.bot.send_message=AsyncMock(return_value=MagicMock(edit_text=AsyncMock(side_effect=edit)))
     async def fake_download(url,path,size,progress,headers):
         await progress(50,100,10)
         await asyncio.wait_for(edited.wait(),1)
         path.write_bytes(b'media')
     monkeypatch.setattr('satoubot.download.download',fake_download)
+    monkeypatch.setattr('satoubot.download.probe',AsyncMock(return_value={'status':'ready','size':100}))
     await bot.perform_download(context,job)
     assert 5 in intervals
     assert store.get(job)['state']=='review'

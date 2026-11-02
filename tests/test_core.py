@@ -58,7 +58,8 @@ async def test_unauthorized_approval_is_ignored(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_parallel_download_and_range_validation(tmp_path):
+async def test_parallel_download_and_range_validation(tmp_path, monkeypatch):
+    monkeypatch.setattr('satoubot.public_transport.public_address', AsyncMock(return_value='127.0.0.1'))
     import asyncio
     import threading
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
