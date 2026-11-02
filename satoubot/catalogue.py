@@ -133,6 +133,8 @@ class CatalogueFunctions:
         qualities = ', '.join(dict.fromkeys(str(s.get('quality') or 'unspecified')[:35] for s in streams))[:250]
         caption = f'{movie["name"][:150]}\nYear: {movie.get("year") or movie.get("releaseInfo") or "unknown"}\nQualities: {qualities or "none found"}\nAvailable files: {len(source_ids)}\nSelect a file to download. Larger or unsupported files can be saved as links.'
         if errors: caption += f'\n{len(errors)} source(s) failed or need configuration.'
+        for error in dict.fromkeys(e for e in errors if e.startswith('Plugin runtime:')):
+            caption += '\n' + error
         if not streams: caption += '\nNo playable links returned. Try another source or movie.'
         artwork = movie.get('background') or movie.get('poster')
         selection = self.store.cache('pages', source_ids)

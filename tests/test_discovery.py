@@ -255,3 +255,37 @@ async def test_progress_ticks_every_five_seconds_and_completion_keeps_clean_name
     assert store.get(job)['state']=='review'
     assert Path(store.get(job)['path']).name=='Example 2026 720P.mkv'
     assert any('Download done' in c.args[1] for c in context.bot.send_message.await_args_list)
+
+
+@pytest.mark.asyncio
+async def test_destination_lookup_failure_keeps_existing_target(tmp_path):
+    from telegram.error import BadRequest
+    store=Store(tmp_path/'db'); store.set_setting('target','-1001')
+    key=store.cache('destination',{'target':-1002,'job':0,'title':'Other'})
+    bot=Bot(store,tmp_path,42,MagicMock())
+    q=MagicMock(); q.data=f'dest:{key}'; q.message.reply_text=AsyncMock(); q.edit_message_reply_markup=AsyncMock()
+    update=MagicMock(); update.callback_query=q
+    context=MagicMock(); context.bot.get_chat_member=AsyncMock(side_effect=BadRequest('chat not found'))
+    await bot.select_destination(update,context)
+    assert store.setting('target') == '-1001'
+    q.message.reply_text.assert_awaited_once()
+    q.edit_message_reply_markup.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_runtime_error_is_reported_in_movie_card(tmp_path, monkeypatch):
+    from satoubot.discovery import HDHUB, ProviderRuntimeError
+    store=Store(tmp_path/'db'); service=Discovery(store)
+    service.register(HDHUB, {'name':'HdHub','catalogs':[]})
+    service.register('https://repo.test/manifest.json', {'name':'Plugins','scrapers':[{'filename':'provider.js','supportedTypes':['movie']}]})
+    monkeypatch.setattr('satoubot.discovery.fetch_bytes', AsyncMock(return_value=b'provider'))
+    monkeypatch.setattr('satoubot.discovery.run_plugin', AsyncMock(side_effect=ProviderRuntimeError('Plugin runtime: Node.js 24 or newer is required (found 22).')))
+    movie={'id':'tt1','name':'Example','moviedb_id':1}
+    streams, errors=await service.streams(movie)
+    assert not streams
+    assert errors == ['Plugin runtime: Node.js 24 or newer is required (found 22).']
+    key=store.cache('movie', movie); bot=Bot(store,tmp_path,42,MagicMock())
+    monkeypatch.setattr(Discovery,'details',AsyncMock(return_value=movie))
+    context=MagicMock(); context.bot.send_message=AsyncMock()
+    await bot.movie_card(context,key)
+    assert 'Node.js 24 or newer is required' in context.bot.send_message.await_args.args[1]

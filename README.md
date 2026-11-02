@@ -48,7 +48,15 @@ Movie-name search and automatic catalogue artwork are available through supporte
 
 ### Install on a PC (Ubuntu or Windows with WSL)
 
+<!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:db7a4107844e90140305ce902e729fd0d3364c8b225d4a29fecdcbb0286996d3 -->
+
 These steps run the bot on Ubuntu. On Windows, first install [WSL with Ubuntu](https://learn.microsoft.com/windows/wsl/install) and run the commands in the Ubuntu terminal. Install Python 3.11 or newer, Git, Node.js 24 or newer and npm first. Check with `python3 --version`, `git --version`, `node --version` and `npm --version`.
+
+Install Bubblewrap with `sudo apt update && sudo apt install bubblewrap`. Nuvio plugins need working unprivileged user and network namespaces; the bot fails closed for plugins if Bubblewrap or those namespaces are unavailable. Catalogue add-on lookups work independently.
+
+<!-- /coderabbit-ai-generated:v1 -->
 
 1. Get this repository and enter its folder. To use this task's changes, first publish the task branch, then check it out:
 
@@ -147,7 +155,13 @@ movie, page and confirmation selections expire after one hour; source URLs and f
 
 <!-- /coderabbit-ai-generated:v1 --> `/search` is the private-chat command.
 
-Nuvio scripts run in a Node child process with a cleared environment, restricted filesystem/module access, timeouts and a memory limit. Add only repositories you trust; this is not a security sandbox for hostile JavaScript. The bot credentials and user session are not supplied to the child. The compatibility bridge currently provides fetch, timers, URL utilities, Cheerio, CryptoJS and empty `SCRAPER_SETTINGS`.
+<!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:5d5fc0435d3fef8777d721187bf6dec0d15c88451972e3bfdcb33c8a7337f4e7 -->
+
+Nuvio scripts run in a Bubblewrap-isolated Node process with a private network namespace, no host user files, a cleared environment and resource limits. Node permissions and `node:vm` do not provide isolation themselves. Plugin HTTP requests pass through a broker that permits public destinations only, pins DNS results and checks redirects individually. Private network plugin destinations are unavailable. Bubblewrap and working unprivileged namespaces are required; plugin execution fails closed if they are unavailable. Only add repositories you trust. The broker restriction applies to plugin requests; other add-on and media requests use their existing network paths. The compatibility bridge provides fetch, timers, URL utilities, Cheerio, CryptoJS and empty `SCRAPER_SETTINGS`.
+
+<!-- /coderabbit-ai-generated:v1 -->
 
 ## Testing
 

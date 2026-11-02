@@ -1,11 +1,14 @@
 """Catalogue add-ons and Nuvio provider repository adapters."""
 import asyncio
+from functools import lru_cache
+import subprocess
 import json
 import re
-import os
 import shutil
 from pathlib import Path
 from urllib.parse import quote, urljoin, urlparse
+
+from .plugin_network import fetch_public
 
 import httpx
 
@@ -109,6 +112,8 @@ class Discovery:
                     for stream in found[:30]:
                         if isinstance(stream, dict) and isinstance(stream.get('url'), str):
                             streams.append(dict(stream, provider=entry.get('name', 'Provider')))
+                except ProviderRuntimeError as exc:
+                    if str(exc) not in errors: errors.append(str(exc))
                 except Exception:
                     errors.append(entry.get('name', 'Provider'))
         jobs = []
@@ -145,21 +150,81 @@ class Discovery:
         return list(unique.values()), errors
 
 
-async def run_plugin(code, tmdb):
-    runtime = Path(__file__).parent / 'plugin_runtime'
-    process = await asyncio.create_subprocess_exec(
-        shutil.which('node') or 'node', '--permission', f'--allow-fs-read={runtime.resolve()}', '--max-old-space-size=128', str(runtime / 'runner.cjs'),
-        stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
-        env={'PATH': os.defpath}, cwd=runtime,
-    )
+class ProviderRuntimeError(RuntimeError):
+    """An actionable provider runtime configuration problem."""
+
+
+@lru_cache(maxsize=8)
+def node_major(node):
     try:
-        out, _ = await asyncio.wait_for(process.communicate(json.dumps({'code': code, 'tmdb': tmdb}).encode()), 65)
-        if process.returncode or len(out) > 2_000_000:
-            raise ValueError('Provider failed')
-        result = json.loads(out)
-        if not isinstance(result, list): raise ValueError('Invalid provider results')
-        return result
+        result = subprocess.run([node, '--version'], capture_output=True, text=True,
+                                check=True, timeout=5)
+        match = re.fullmatch(r'v(\d+)\.\d+\.\d+(?:[-+].*)?', result.stdout.strip())
+        if not match:
+            raise ValueError('Unexpected version')
+        major = int(match.group(1))
+    except (OSError, subprocess.SubprocessError, ValueError) as exc:
+        raise ProviderRuntimeError('Plugin runtime: could not determine the Node.js version.') from exc
+    if major < 24:
+        raise ProviderRuntimeError(f'Plugin runtime: Node.js 24 or newer is required (found {major}).')
+    return major
+
+
+async def run_plugin(code, tmdb):
+    runtime = (Path(__file__).parent / 'plugin_runtime').resolve()
+    node, bwrap = shutil.which('node'), shutil.which('bwrap')
+    if not node or not bwrap:
+        raise ProviderRuntimeError('Plugin runtime: Node.js 24+ and bubblewrap are required for provider isolation.')
+    node_major(node)
+    # Node 25 restricts networking by default; the isolated worker only uses the
+    # broker via stdio, so it does not need --allow-net on any Node version.
+    # Only the runtime and system libraries are visible; the isolated worker has
+    # its own network namespace. The host broker is its only network path.
+    process = await asyncio.create_subprocess_exec(
+        bwrap, '--unshare-user', '--unshare-net', '--unshare-pid', '--unshare-ipc', '--unshare-uts', '--cap-drop', 'ALL', '--die-with-parent', '--new-session',
+        '--ro-bind', '/usr', '/usr', '--ro-bind', '/lib', '/lib', '--ro-bind', '/lib64', '/lib64',
+        '--dev', '/dev', '--dir', '/tmp', '--ro-bind', str(runtime), '/app',
+        '--ro-bind', node, '/node', '--chdir', '/app',
+        '/node', '--permission', '--allow-fs-read=/app', '--max-old-space-size=128', '/app/runner.cjs',
+        stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+        env={'PATH': '/usr/bin:/bin'}, limit=2_100_000,
+    )
+    requests = set()
+    lock = asyncio.Lock()
+    semaphore = asyncio.Semaphore(4)
+    async def respond(message):
+        try:
+            async with semaphore:
+                response = await fetch_public(message.get('url'), message.get('method'), message.get('headers'), message.get('body'))
+            reply = {'id': message['id'], 'response': response}
+        except Exception:
+            reply = {'id': message['id'], 'error': 'Request failed or destination is not allowed'}
+        async with lock:
+            process.stdin.write((json.dumps(reply) + '\n').encode())
+            await process.stdin.drain()
+    async def run():
+        process.stdin.write((json.dumps({'code': code, 'tmdb': tmdb}) + '\n').encode())
+        await process.stdin.drain()
+        count = 0
+        while line := await process.stdout.readline():
+            message = json.loads(line)
+            if message.get('type') == 'result':
+                result = message.get('results')
+                if not isinstance(result, list): raise ValueError('Invalid provider results')
+                return result
+            if message.get('type') != 'fetch' or not isinstance(message.get('id'), int):
+                raise ValueError('Invalid provider request')
+            count += 1
+            if count > 100: raise ValueError('Too many provider requests')
+            task = asyncio.create_task(respond(message))
+            requests.add(task)
+            task.add_done_callback(requests.discard)
+        raise ValueError('Provider failed or isolation unavailable')
+    try:
+        return await asyncio.wait_for(run(), 65)
     finally:
+        for task in requests: task.cancel()
+        if requests: await asyncio.gather(*requests, return_exceptions=True)
         if process.returncode is None:
             process.kill()
-            await process.wait()
+        await process.wait()

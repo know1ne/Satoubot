@@ -1,4 +1,5 @@
 from telegram import InlineKeyboardButton as Button, InlineKeyboardMarkup as Markup
+from telegram.error import TelegramError
 from telethon.utils import get_peer_id
 
 
@@ -37,7 +38,11 @@ class DestinationFunctions:
         destination=self.store.cached(key,'destination')
         if not destination:
             await q.message.reply_text('Selection expired. Open the channel menu again.');return
-        member=await context.bot.get_chat_member(destination['target'],context.bot.id)
+        try:
+            member=await context.bot.get_chat_member(destination['target'],context.bot.id)
+        except TelegramError:
+            await q.message.reply_text('Could not check the bot’s access to this chat. Check its administrator access and try again.')
+            return
         if member.status!='administrator':
             await q.message.reply_text('Make the bot an administrator before selecting this chat.');return
         self.store.set_setting('target',destination['target'])
