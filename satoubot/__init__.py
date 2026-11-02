@@ -1,0 +1,1 @@
+"""Satoubot media administration application."""
