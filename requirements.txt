@@ -3,3 +3,5 @@ httpx>=0.27,<1
 psutil>=6,<8
 Telethon>=1.40,<2
 python-dotenv>=1,<2
+Pillow>=11,<13
+hachoir>=3.3,<4

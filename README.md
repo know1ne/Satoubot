@@ -6,26 +6,151 @@ Early foundation for a private Telegram media administrator. This is not yet the
 
 ## Current functionality
 
-A single configured admin can select a channel or group, send a direct HTTP(S) media URL, inspect its reported size, download a file within the 2000 MB limit, rename it, and approve an upload. The upload uses the logged-in Telegram user account through MTProto, so the post is sent by that account. The selected account needs access to the destination. File transfers report progress, speed, and estimated time. `/status` shows CPU and memory, `/find` searches locally recorded published items, and `/saved` lists oversized links.
+<!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:87948aaa984bf25a9e6ce9d14879ae6030f10981f89d51340fc7beba15996bf7 -->
+
+A single configured admin can select a channel or group, send a direct HTTP(S) media URL, inspect its reported size, download a file within the 2000 MB limit, rename it, choose a thumbnail, and approve an upload. On a review preview, choose **Set thumbnail** and send a photo; review the new preview before approving. Telegram may ignore custom thumbnails for some file types or media without recognizable video dimensions. The upload uses the logged-in Telegram user account through MTProto, so the post is sent by that account. The selected account needs access to the destination. File transfers report progress, speed, and estimated time. `/status` shows CPU and memory, `/find` searches locally recorded published items, and `/saved` lists oversized links.
+
+<!-- /coderabbit-ai-generated:v1 -->
 
 A download uses up to four HTTP byte-range connections when the server advertises range support and provides a stable validator. Otherwise it uses a single connection. Speed depends on the source and network. The MTProto uploader currently uses Telethon's standard uploader; parallel upload acceleration is not implemented.
 
+<!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:049204d5e1a86d67e82eff8a07b157d70779dcc55fdbf06bff1f16d8fe287ff8 -->
+
+## Transfer controls and menu
+
+Use **Start transfers** and **Stop transfers** to allow or block new downloads and uploads. The setting persists across restarts. A running transfer finishes when stopped; another transfer requested while one is running must be retried after it finishes. Search, saved links and destination selection remain available while transfers are off. Uploads still require individual approval. <!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:de2ef4aa517506ef486208025498897c72c699345fbdfbeeb4d9425d402ff666 -->
+
+Group management and migration menu entries are placeholders for later features. My channels lists channels and groups owned by the logged-in user where the bot is an administrator. When no destination is set, upload review opens this selection; selecting a destination generates a fresh approval preview. Bot administrator/posting access is checked again before upload.
+
+<!-- /coderabbit-ai-generated:v1 -->
+
+Download, upload, search, group management, migration and user session code are in separate modules. The bot session is managed by the Telegram application; the user session is stored locally. <!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:cf34a90fefbf7919e4ed1107ac01d867678b19c86c155b6e0980465019350997 -->
+
+Movie-name search and automatic catalogue artwork are available through supported Stremio catalogue manifests. Scheduled daily discovery is still pending.
+
+<!-- /coderabbit-ai-generated:v1 -->
+
 ## Setup
 
-Use Python 3.11 or newer. Create a Telegram bot with BotFather and obtain an API ID and hash from Telegram. Start a [local Bot API server](https://core.telegram.org/bots/api#using-a-local-bot-api-server) separately. Configure it for local mode.
+<!-- /coderabbit-ai-generated:v1 -->
 
-1. Create a virtual environment: `python -m venv .venv` and activate it.
-2. Install dependencies: `pip install -r requirements.txt`.
-3. Copy `.env.example` to `.env` and fill in the bot token, your numeric Telegram user ID, API ID, API hash and local Bot API address.
-4. Run `python -m satoubot.app`. On first run, authenticate the user account in the local terminal. Never share the session file, login codes or `.env`.
-5. Add the bot and user account to the destination with appropriate permissions. Start the bot in a private chat and select the destination.
+<!-- coderabbit-ai-generated:v1 -->
 
-Keep the data directory private; it contains the user session, database, saved source URLs and downloaded files. A published item with an unknown upload outcome needs manual inspection before retrying.
+<!-- coderabbit-ai-generated-section:v1:5bc732f79730278c318642c0029ca9f77c19895ebaa59fd8097b948319bde880 -->
+
+### Install on a PC (Ubuntu or Windows with WSL)
+
+These steps run the bot on Ubuntu. On Windows, first install [WSL with Ubuntu](https://learn.microsoft.com/windows/wsl/install) and run the commands in the Ubuntu terminal. Install Python 3.11 or newer, Git, Node.js 24 or newer and npm first. Check with `python3 --version`, `git --version`, `node --version` and `npm --version`.
+
+1. Get this repository and enter its folder. To use this task's changes, first publish the task branch, then check it out:
+
+   ```bash
+   git clone https://github.com/cinespicebusinesss/Satoubot.git
+   cd Satoubot
+   git switch coderabbit/telegram-media-admin-bot/de70788f
+   ```
+
+2. Install bot dependencies:
+
+   ```bash
+   python3 -m venv .venv
+   source .venv/bin/activate
+   python -m pip install -r requirements.txt
+   npm ci --prefix satoubot/plugin_runtime
+   cp .env.example .env
+   ```
+
+   On Ubuntu, install the matching `python3-venv` package if creating the environment fails. Keep the terminal open.
+
+3. Create a bot with [BotFather](https://t.me/BotFather). Get your numeric Telegram user ID, and obtain your own API ID and API hash from [my.telegram.org](https://my.telegram.org). Edit `.env` (for example `nano .env`) and set `BOT_TOKEN`, `ADMIN_USER_ID`, `TELEGRAM_API_ID`, and `TELEGRAM_API_HASH`. Leave `BOT_API_URL=http://127.0.0.1:8081` for a server on the same machine. `DATA_DIR=./data` stores downloads in the repository's `data/media` directory. Keep `.env` and the `data` directory private.
+
+4. Install Telegram's **local Bot API server** separately using the [official build instructions generator](https://tdlib.github.io/telegram-bot-api/build.html) for Ubuntu. It requires a compiler, CMake, gperf, OpenSSL and zlib. In a second terminal, from the SatouBot folder, load the credentials and start the installed server:
+
+   ```bash
+   set -a
+   source .env
+   set +a
+   telegram-bot-api --local
+   ```
+
+   Keep this terminal running. The server uses `TELEGRAM_API_ID` and `TELEGRAM_API_HASH` from the environment and listens on port 8081 by default. If the executable was installed outside your PATH, use its full path. If this bot was previously connected to Telegram's hosted Bot API, follow [Telegram's local-server switching instructions](https://github.com/tdlib/telegram-bot-api#switching) before starting it; moving an existing bot logs it out of the previous API server.
+
+5. In the first terminal, start the bot:
+
+   ```bash
+   source .venv/bin/activate
+   python -m satoubot.app
+   ```
+
+   On first launch enter the Telegram account's phone number, login code, and two-step verification password if requested. The bot uses this user account for uploads. Keep both terminals running; stopping either stops its service. Restart the local server and bot with the same commands after restarting the PC.
+
+6. Add the bot as an administrator to the destination channel or group, with posting permission, and ensure the user account can post there. Open a private chat with the bot and send `/start`. Use **Add-ons** to add a searchable catalogue, such as `https://v3-cinemeta.strem.io/manifest.json`; see **Catalogue and provider search** below. To use inline search, enable it via BotFather's `/setinline`.
+
+This foundation is not configured to start automatically with the PC. A published item with an unknown upload outcome needs manual inspection before retrying.
+
+<!-- /coderabbit-ai-generated:v1 -->
 
 ## Work remaining
 
-Catalogue and addon discovery, automatic daily discovery, quality choices, thumbnail management, inline file search, migration, source refresh, torrent and M3U8 downloads, download-page extraction, automated error retries and channel availability monitoring are not implemented yet. Reported links are recorded but not automatically refreshed. The current search records message IDs and does not deliver a Telegram file. Do not rely on this foundation for unattended publishing or migration.
+<!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:d9d2894ba7cd912ffc037573d9224c035c444c7fc48121c5c8c1206f663dd303 -->
+
+<!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:bcf4cec059eae3e6359b3e9dc943e80d96947af0988b3bb6a1fd372c18e336fa -->
+
+Automatic daily discovery, inline retrieval of already published Telegram files, migration, source refresh, torrent, DASH and M3U8 downloads, generic download-page extraction, automated error retries and channel availability monitoring are not implemented yet. Search can list HTTP links returned by providers; unsupported formats and files above 2000 MB are saved as links. A size that cannot be verified prevents downloading. Provider success depends on source availability and compatibility; plugin settings screens are not implemented.
+
+<!-- /coderabbit-ai-generated:v1 -->
+
+<!-- /coderabbit-ai-generated:v1 --> Reported links are recorded but not automatically refreshed. The current search records message IDs and does not deliver a Telegram file. Do not rely on this foundation for unattended publishing or migration.
+
+<!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:2b768b0766e5fdb057113593cd372e2670be07e86850e9ba5177c61f706d0cb4 -->
+
+## Catalogue and provider search
+
+1. Install Node.js 24+ and run `npm ci --prefix satoubot/plugin_runtime` once, alongside the Python dependencies.
+2. <!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:fb37879783d815423664c9757cbb778cdcd0d4db283cf72347493eb253154107 -->
+
+Open **Add-ons** (or `/addons`) and send a Stremio catalogue manifest URL, or upload a JSON manifest and then provide its original URL so relative endpoints can be resolved.
+
+<!-- /coderabbit-ai-generated:v1 --> For example, Cinemeta: `https://v3-cinemeta.strem.io/manifest.json`. The catalogue must advertise a movie catalogue with a `search` extra. For Nuvio plugins, movie metadata must include `moviedb_id`, `tmdb_id`, or a `tmdb:` ID.
+3. Add a Nuvio repository URL in the same menu, or use **Add Yoru providers**. The supplied Yoru repository is loaded automatically on the first source lookup if no Nuvio repository has been saved. Manifests persist in the database. Provider scripts are fetched when looking up streams.
+4. Send a movie name or `/search Insidious`. Select the correct movie; the bot fetches details and sources, then shows landscape artwork and buttons with file quality, reported/verified size and format. A size labelled unknown is rechecked before download. Search alone never downloads or uploads media.
+5. <!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:f170a0d2386266b1c93feccf8ae6db1313ece5396e76a4191a369342198d36de -->
+
+File choices show four per page with More/Previous and Cancel. Select a **DW** button to see catalogue details, the actual source filename and verified size, then choose Yes or No. Only Yes starts a download. A separate approval is required before upload. Downloads show the actual filename, downloaded/total bytes, speed and ETA every five seconds, including during stalls, and send a completion notice. The local file is then renamed using the catalogue title, year, detected quality/codec and language labels. Source headers and alternative URLs are retained. Versions above 2000 MB return a saved link for manual download and never enter the download/upload path.
+
+<!-- /coderabbit-ai-generated:v1 -->
+6. **Library search** and `/find` search previously published records. **Search** searches online catalogues. Both work with transfers off.
+
+For Telegram inline search, enable inline mode for the bot through BotFather (`/setinline`). Type `@your_bot_username Insidious` in Telegram. Results include a **View available files** button that opens the private bot. Inline results are restricted to the configured admin; <!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:4f23426e260a7d8dd36c8fe123c33368ac37f5cfc727865f06d76e384bb78b7b -->
+
+movie, page and confirmation selections expire after one hour; source URLs and file information are stored persistently in the database and shown in Saved links. Identical URLs are merged; matching movie IDs, verified source filenames and byte sizes merge known mirror choices. Files with different names and no shared content identity cannot be proven identical before download.
+
+<!-- /coderabbit-ai-generated:v1 --> `/search` is the private-chat command.
+
+Nuvio scripts run in a Node child process with a cleared environment, restricted filesystem/module access, timeouts and a memory limit. Add only repositories you trust; this is not a security sandbox for hostile JavaScript. The bot credentials and user session are not supplied to the child. The compatibility bridge currently provides fetch, timers, URL utilities, Cheerio, CryptoJS and empty `SCRAPER_SETTINGS`.
 
 ## Testing
+
+<!-- /coderabbit-ai-generated:v1 -->
 
 Install pytest and pytest-asyncio and run `python -m pytest -q`. Tests do not require Telegram credentials. Live Telegram transfers require a real bot, account and destination.

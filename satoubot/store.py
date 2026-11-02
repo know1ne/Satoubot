@@ -7,6 +7,10 @@ class Store:
         self.db = sqlite3.connect(path)
         self.db.row_factory = sqlite3.Row
         self.db.executescript('''
+            CREATE TABLE IF NOT EXISTS source_links (id INTEGER PRIMARY KEY AUTOINCREMENT, fingerprint TEXT UNIQUE NOT NULL, payload TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS manifests (url TEXT PRIMARY KEY, kind TEXT NOT NULL, data TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS discovery_cache (id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL, payload TEXT NOT NULL, created_at TEXT DEFAULT CURRENT_TIMESTAMP);
+            DELETE FROM discovery_cache WHERE created_at < datetime('now', '-1 hour');
             CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS jobs (
                 id INTEGER PRIMARY KEY, source TEXT NOT NULL, title TEXT NOT NULL,
@@ -45,7 +49,36 @@ class Store:
         self.db.commit()
 
     def find_source(self, source):
-        return self.db.execute("SELECT * FROM jobs WHERE source=? AND state!='failed' ORDER BY id DESC LIMIT 1", (source,)).fetchone()
+        return self.db.execute("SELECT * FROM jobs WHERE source=? AND state NOT IN ('failed','cancelled') ORDER BY id DESC LIMIT 1", (source,)).fetchone()
 
     def search(self, query):
         return self.db.execute("SELECT * FROM jobs WHERE state='published' AND title LIKE ? ORDER BY title LIMIT 20", ('%' + query + '%',)).fetchall()
+
+    def cache(self, kind, payload):
+        import json
+        if kind == 'stream':
+            import hashlib
+            identity = payload.get('identity') or payload['url']
+            fingerprint = hashlib.sha256(identity.encode()).hexdigest()
+            row = self.db.execute("SELECT id,payload FROM source_links WHERE fingerprint=? OR json_extract(payload, '$.url')=? ORDER BY (fingerprint=?) DESC LIMIT 1",(fingerprint,payload['url'],fingerprint)).fetchone()
+            if row:
+                old=json.loads(row['payload'])
+                payload['mirrors']=[*old.get('mirrors',[]), {'url':old['url'],'headers':old.get('headers',{})}]
+                payload['alternatives']=list(dict.fromkeys([*old.get('alternatives',[]),old['url'],*payload.get('alternatives',[])]))
+                self.db.execute('UPDATE source_links SET fingerprint=?,payload=? WHERE id=?',(fingerprint,json.dumps(payload),row['id']))
+                self.db.commit()
+                return row['id']
+            cursor=self.db.execute('INSERT INTO source_links(fingerprint,payload) VALUES (?,?)',(fingerprint,json.dumps(payload)))
+            self.db.commit()
+            return cursor.lastrowid
+        cursor = self.db.execute('INSERT INTO discovery_cache(kind,payload) VALUES (?,?)', (kind, json.dumps(payload)))
+        self.db.commit()
+        return cursor.lastrowid
+
+    def cached(self, key, kind):
+        import json
+        if kind == 'stream':
+            row=self.db.execute('SELECT payload FROM source_links WHERE id=?',(key,)).fetchone()
+            return json.loads(row['payload']) if row else None
+        row = self.db.execute("SELECT payload FROM discovery_cache WHERE id=? AND kind=? AND created_at > datetime('now', '-1 hour')", (key, kind)).fetchone()
+        return json.loads(row['payload']) if row else None
