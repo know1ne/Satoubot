@@ -1,4 +1,6 @@
 import asyncio
+import contextvars
+from functools import wraps
 import logging
 import os
 import secrets
@@ -10,7 +12,7 @@ import psutil
 from PIL import Image, ImageOps
 from dotenv import load_dotenv
 from telegram import (InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton,
-                      KeyboardButtonRequestChat, ReplyKeyboardMarkup, Update)
+                      KeyboardButtonRequestChat, ReplyKeyboardMarkup, ReplyKeyboardRemove, Update)
 from telegram.ext import (Application, CallbackQueryHandler, CommandHandler,
                           MessageHandler, InlineQueryHandler, filters)
 
@@ -25,17 +27,38 @@ from .sessions import SessionManager
 from .destinations import DestinationFunctions
 from .catalogue import CatalogueFunctions
 from .discovery import Discovery
+from .menu import MenuFunctions, navigation
 
 log = logging.getLogger('satoubot')
+current_admin = contextvars.ContextVar('current_admin', default=None)
+
+def admin_session(handler):
+    @wraps(handler)
+    async def wrapped(update, context):
+        user = update.effective_user or (update.inline_query.from_user if update.inline_query else None)
+        token = current_admin.set(user.id if user else None)
+        try: return await handler(update, context)
+        finally: current_admin.reset(token)
+    return wrapped
 
 
-class Bot(DestinationFunctions, CatalogueFunctions, DownloadFunctions, UploadFunctions, SearchFunctions, GroupManagementFunctions, MigrationFunctions):
-    def __init__(self, store, media_dir, admin_id, uploader):
-        self.store, self.media_dir, self.admin_id, self.uploader = store, media_dir, admin_id, uploader
+class Bot(MenuFunctions, DestinationFunctions, CatalogueFunctions, DownloadFunctions, UploadFunctions, SearchFunctions, GroupManagementFunctions, MigrationFunctions):
+    def __init__(self, store, media_dir, admin_id, uploader, upload_parallel_parts=1):
+        self.store, self.media_dir, self.owner_id, self.uploader = store, media_dir, admin_id, uploader
+        if not 1 <= upload_parallel_parts <= 4:
+            raise ValueError('UPLOAD_PARALLEL_PARTS must be between 1 and 4')
+        self.upload_parallel_parts = upload_parallel_parts
         self.tasks = set()
 
+    @property
+    def admin_id(self):
+        return current_admin.get() or self.owner_id
+
+    def is_admin(self, user_id):
+        return user_id == self.owner_id or bool(self.store.db.execute('SELECT 1 FROM admins WHERE user_id=?',(user_id,)).fetchone())
+
     def authorized(self, update):
-        return bool(update.effective_user and update.effective_user.id == self.admin_id
+        return bool(update.effective_user and self.is_admin(update.effective_user.id)
                     and update.effective_chat and update.effective_chat.type == 'private')
 
     def spawn(self, coro):
@@ -70,17 +93,8 @@ class Bot(DestinationFunctions, CatalogueFunctions, DownloadFunctions, UploadFun
                 return
             self.launch_discovery(self.safe_movie_card(context, key))
             return
-        keyboard = [[KeyboardButton('Start transfers'), KeyboardButton('Stop transfers')],
-                    [KeyboardButton('Download'), KeyboardButton('Uploads awaiting approval')],
-                    [KeyboardButton('Search'), KeyboardButton('Saved links')],
-                    [KeyboardButton('Add-ons'), KeyboardButton('Library search')],
-                    [KeyboardButton('My channels')],
-                    [KeyboardButton('Group management'), KeyboardButton('Migration')],
-                    [KeyboardButton('Select channel', request_chat=KeyboardButtonRequestChat(request_id=1, chat_is_channel=True, request_title=True))],
-                    [KeyboardButton('Select group', request_chat=KeyboardButtonRequestChat(request_id=2, chat_is_channel=False, request_title=True))],
-                    [KeyboardButton('Status'), KeyboardButton('Help')]]
-        state = 'on' if self.transfers_enabled() else 'off'
-        await update.message.reply_text(f'Transfers are {state}. Choose a destination, then send a direct media URL. Every upload requires approval. Use Add-ons to add your catalogue manifest, then Search for a movie.', reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
+        await update.message.reply_text('Opening menu…', reply_markup=ReplyKeyboardRemove())
+        await self.main_menu(update.message)
 
     async def status(self, update, context):
         if not self.authorized(update): return
@@ -100,6 +114,12 @@ class Bot(DestinationFunctions, CatalogueFunctions, DownloadFunctions, UploadFun
     async def text(self, update, context):
         if not self.authorized(update): return
         text = update.message.text.strip()
+        if context.user_data.pop('admin_add_pending', False) is True:
+            if update.effective_user.id != self.owner_id: return
+            if not text.isascii() or not text.isdigit() or not 0 < int(text) < 2**63:
+                await update.message.reply_text('Invalid user ID. Open Admin management and try again.'); return
+            self.store.db.execute('INSERT OR IGNORE INTO admins(user_id) VALUES (?)',(int(text),)); self.store.db.commit()
+            await self.admin_menu(update.message, self.owner_id); return
         if text == 'My channels': return await self.destination_menu(context)
         if text == 'Status': return await self.status(update, context)
         if text == 'Help': return await self.start(update, context)
@@ -117,10 +137,6 @@ class Bot(DestinationFunctions, CatalogueFunctions, DownloadFunctions, UploadFun
             return
         if text == 'Uploads awaiting approval': return await self.pending(update, context)
         if text == 'Add-ons': return await self.addons(update, context)
-        if text == 'Search':
-            context.user_data['catalogue_search_pending'] = True
-            await update.message.reply_text('Send a movie name to search catalogues. Searching will not download anything.')
-            return
         if text == 'Library search':
             context.user_data['search_pending'] = True
             await update.message.reply_text('Send a title to search published items, or use /find <title>.')
@@ -151,9 +167,18 @@ class Bot(DestinationFunctions, CatalogueFunctions, DownloadFunctions, UploadFun
         if not self.authorized(update): return
         q = update.callback_query
         await q.answer()
+        if q.data.startswith('directretry:'):
+            try: source=self.store.cached(int(q.data.split(':')[1]), 'direct_retry')
+            except (ValueError, IndexError): return
+            if not source:
+                await q.message.reply_text('This check expired. Send the link again.'); return
+            from types import SimpleNamespace
+            return await self.handle_source(SimpleNamespace(message=q.message), source['url'])
+        if q.data.startswith(('menu:', 'adminremove:')):
+            return await self.menu_callback(update, context)
         if q.data == 'destcancel' or q.data.startswith(('dest:', 'choose_dest:')):
             return await self.select_destination(update, context)
-        if q.data in ('defaultproviders', 'searchagain') or q.data.startswith(('movie:', 'file:', 'page:', 'cancelpage:', 'yes:', 'no:')):
+        if q.data in ('defaultproviders', 'searchagain') or q.data.startswith(('movie:', 'file:', 'retryfile:', 'page:', 'cancelpage:', 'yes:', 'no:')):
             return await self.catalogue_callback(update, context)
         try:
             parts = q.data.split(':')
@@ -176,6 +201,7 @@ class Bot(DestinationFunctions, CatalogueFunctions, DownloadFunctions, UploadFun
             await q.message.reply_text('Download cancelled.')
         elif action == 'dl' and job['state'] == 'ready':
             if not await self.transfer_gate(q.message): return
+            self.active_description = f'Downloading #{job_id} · {job["filename"]}'
             self.store.update(job_id, state='downloading')
             self.spawn(self.perform_download(context, job_id))
             await q.edit_message_reply_markup(reply_markup=None)
@@ -201,6 +227,11 @@ class Bot(DestinationFunctions, CatalogueFunctions, DownloadFunctions, UploadFun
                 await self.destination_menu(context,job_id)
                 return
             if not await self.transfer_gate(q.message): return
+            current = self.store.get(job_id)
+            if not self.authorized(update) or not current or current['state'] != 'review' or current['approval_token'] != parts[2] or current['target'] != target or self.store.setting('target') != target:
+                await q.message.reply_text('This preview is out of date. Use the latest preview.')
+                return
+            self.active_description = f'Uploading #{job_id} · {job["filename"]}'
             self.store.update(job_id, state='uploading', approval_token='')
             self.spawn(self.perform_upload(context, job_id))
             await q.edit_message_reply_markup(reply_markup=None)
@@ -210,12 +241,14 @@ class Bot(DestinationFunctions, CatalogueFunctions, DownloadFunctions, UploadFun
 
     async def preview(self, context, job_id):
         job = self.store.get(job_id)
+        if not job or job['state'] != 'review': return
         target = self.store.setting('target', '')
         token = secrets.token_hex(4)
         self.store.update(job_id, target=target, approval_token=token)
         keyboard = InlineKeyboardMarkup([[InlineKeyboardButton('Approve upload', callback_data=f'upload:{job_id}:{token}')],
                                          [InlineKeyboardButton('Set thumbnail', callback_data=f'thumb:{job_id}:{token}')],
-                                         [InlineKeyboardButton('Select channel', callback_data=f'choose_dest:{job_id}')]])
+                                         [InlineKeyboardButton('Select channel', callback_data=f'choose_dest:{job_id}')],
+                                         navigation()])
         text = f'Ready for review #{job_id}\nName: {job["filename"]}\nSize: {job["size"]/1_000_000:.1f} MB\nSaved: {job["path"]}\nDestination: {target or "not selected"}\nUse /rename {job_id} new name before approval.'
         if job['thumbnail']:
             with open(job['thumbnail'], 'rb') as photo:
@@ -289,7 +322,10 @@ class Bot(DestinationFunctions, CatalogueFunctions, DownloadFunctions, UploadFun
             job_id = int(context.args[0]); title = ' '.join(context.args[1:]).strip()
             job = self.store.get(job_id)
             if not job or job['state'] != 'review' or not title: raise ValueError()
-            name = safe_name(title) + Path(job['filename']).suffix
+            suffix = Path(job['filename']).suffix
+            name = safe_name(title)
+            while suffix and name.lower().endswith(suffix.lower()): name = name[:-len(suffix)]
+            name = name.rstrip(' .') + suffix
             old = Path(job['path']); new = old.with_name(name)
             if new != old and new.exists(): raise ValueError()
             old.rename(new)
@@ -323,7 +359,11 @@ def main():
     store.db.commit()
     sessions = SessionManager(root, api_id, api_hash)
     uploader = sessions.user
-    bot = Bot(store, media, admin, uploader)
+    try:
+        upload_parallel_parts = int(os.getenv('UPLOAD_PARALLEL_PARTS', '1'))
+    except ValueError as exc:
+        raise ValueError('UPLOAD_PARALLEL_PARTS must be an integer from 1 to 4') from exc
+    bot = Bot(store, media, admin, uploader, upload_parallel_parts)
 
     async def post_init(app):
         await sessions.start()
@@ -339,20 +379,20 @@ def main():
     endpoint = os.getenv('BOT_API_URL', 'http://127.0.0.1:8081').rstrip('/')
     application = (Application.builder().token(token).base_url(endpoint+'/bot').base_file_url(endpoint+'/file/bot')
                    .post_init(post_init).post_shutdown(post_shutdown).build())
-    application.add_handler(CommandHandler('start', bot.start))
-    application.add_handler(CommandHandler('status', bot.status))
-    application.add_handler(CommandHandler('rename', bot.rename))
-    application.add_handler(CommandHandler('find', bot.find))
-    application.add_handler(CommandHandler('search', bot.online_search))
-    application.add_handler(CommandHandler('addons', bot.addons))
-    application.add_handler(InlineQueryHandler(bot.inline_search))
-    application.add_handler(CommandHandler('saved', bot.saved))
-    application.add_handler(CommandHandler('pending', bot.pending))
-    application.add_handler(CallbackQueryHandler(bot.callback))
-    application.add_handler(MessageHandler(filters.StatusUpdate.CHAT_SHARED, bot.chat_shared))
-    application.add_handler(MessageHandler(filters.PHOTO, bot.thumbnail_photo))
-    application.add_handler(MessageHandler(filters.Document.ALL, bot.manifest_document))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, bot.text))
+    application.add_handler(CommandHandler('start', admin_session(bot.start)))
+    application.add_handler(CommandHandler('status', admin_session(bot.status)))
+    application.add_handler(CommandHandler('rename', admin_session(bot.rename)))
+    application.add_handler(CommandHandler('find', admin_session(bot.find)))
+    application.add_handler(CommandHandler('search', admin_session(bot.online_search)))
+    application.add_handler(CommandHandler('addons', admin_session(bot.addons)))
+    application.add_handler(InlineQueryHandler(admin_session(bot.inline_search)))
+    application.add_handler(CommandHandler('saved', admin_session(bot.saved)))
+    application.add_handler(CommandHandler('pending', admin_session(bot.pending)))
+    application.add_handler(CallbackQueryHandler(admin_session(bot.callback)))
+    application.add_handler(MessageHandler(filters.StatusUpdate.CHAT_SHARED, admin_session(bot.chat_shared)))
+    application.add_handler(MessageHandler(filters.PHOTO, admin_session(bot.thumbnail_photo)))
+    application.add_handler(MessageHandler(filters.Document.ALL, admin_session(bot.manifest_document)))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, admin_session(bot.text)))
     try:
         asyncio.get_event_loop()
     except RuntimeError:

@@ -7,6 +7,7 @@ class Store:
         self.db = sqlite3.connect(path)
         self.db.row_factory = sqlite3.Row
         self.db.executescript('''
+            CREATE TABLE IF NOT EXISTS admins (user_id INTEGER PRIMARY KEY);
             CREATE TABLE IF NOT EXISTS source_links (id INTEGER PRIMARY KEY AUTOINCREMENT, fingerprint TEXT UNIQUE NOT NULL, payload TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS manifests (url TEXT PRIMARY KEY, kind TEXT NOT NULL, data TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS discovery_cache (id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL, payload TEXT NOT NULL, created_at TEXT DEFAULT CURRENT_TIMESTAMP);

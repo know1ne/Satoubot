@@ -3,6 +3,8 @@ import asyncio
 from functools import lru_cache
 import subprocess
 import json
+import copy
+import time
 import re
 import shutil
 from pathlib import Path
@@ -13,6 +15,9 @@ from .plugin_network import fetch_public
 import httpx
 
 HDHUB = 'https://hdhub.thevolecitor.qzz.io/eyJ0b3Jib3giOiJ1bnNldCIsInF1YWxpdGllcyI6IjIxNjBwLDEwODBwLDcyMHAiLCJzb3J0IjoiZGVzYyJ9/manifest.json'
+
+PROVIDER_TIMEOUT = 30
+SEARCH_TIMEOUT = 90
 
 DEFAULT_PROVIDERS = 'https://raw.githubusercontent.com/yoruix/nuvio-providers/refs/heads/main/manifest.json'
 
@@ -39,20 +44,38 @@ class Discovery:
     def __init__(self, store):
         self.store = store
 
+    async def cached_json(self, url, ttl=60):
+        cache = getattr(self.store, '_discovery_memo', None)
+        if cache is None:
+            cache = self.store._discovery_memo = {}
+        entry = cache.get(url)
+        if entry and entry[0] > time.monotonic():
+            return copy.deepcopy(entry[1])
+        data = await fetch_json(url)
+        if len(cache) >= 256:
+            cache.pop(next(iter(cache)))
+        cache[url] = (time.monotonic() + ttl, copy.deepcopy(data))
+        return data
+
     async def add(self, url):
         url = url.strip().replace('stremio://', 'https://', 1)
         if not urlparse(url).path.endswith('manifest.json'):
             url = url.rstrip('/') + '/manifest.json'
-        manifest = await fetch_json(url)
-        return self.register(url, manifest)
+        manifest = await self.cached_json(url)
+        return self.register(url, manifest, invalidate=False)
 
-    def register(self, url, manifest):
+    def register(self, url, manifest, invalidate=True):
         if urlparse(url).scheme not in ('http', 'https'):
             raise ValueError('Expected an HTTP(S) base URL')
         if not urlparse(url).path.endswith('manifest.json'):
             url = url.rstrip('/') + '/manifest.json'
         if not isinstance(manifest, dict):
             raise ValueError('Invalid manifest')
+        if invalidate:
+            cache = getattr(self.store, '_discovery_memo', {})
+            prefix = url.rsplit('/',1)[0] + '/'
+            for key in list(cache):
+                if key.startswith(prefix): cache.pop(key, None)
         kind = 'providers' if isinstance(manifest.get('scrapers'), list) else 'addon'
         if kind == 'addon' and not isinstance(manifest.get('catalogs', []), list):
             raise ValueError('Expected a Nuvio repository or catalogue add-on manifest')
@@ -81,73 +104,127 @@ class Discovery:
                         results.append(dict(meta, id=str(meta['id']), addon=url))
                 except Exception:
                     errors.append(manifest.get('name', 'Catalogue'))
+        normalized = lambda text: ' '.join(re.findall(r'\w+', text.casefold()))
+        term = normalized(query)
+        terms=term.split()
+        matches=[m for m in results if all(part in normalized(m['name']).split() for part in terms)] if terms else []
+        if matches: results=matches
+        results.sort(key=lambda m: (normalized(m['name']) != term, not normalized(m['name']).startswith(term)))
         return results[:20], errors
 
     async def details(self, movie):
-        data = await fetch_json(urljoin(movie['addon'], f'meta/movie/{quote(movie["id"], safe="")}.json'))
+        data = await self.cached_json(urljoin(movie['addon'], f'meta/movie/{quote(movie["id"], safe="")}.json'))
         meta = data.get('meta') or {}
         return dict(movie, **meta)
 
-    async def streams(self, movie):
-        streams, errors = [], []
-        if not any(url == HDHUB for url, _, _ in self.manifests()):
-            try: await self.add(HDHUB)
-            except Exception: errors.append('HdHub add-on unavailable')
-        if not any(kind == 'providers' for _, kind, _ in self.manifests()):
-            try:
-                await self.add(DEFAULT_PROVIDERS)
-            except Exception:
-                errors.append('Yoru providers could not be loaded')
+    async def streams(self, movie, on_result=None):
+        """Query sources with bounded concurrency and report each completed batch."""
+        streams, errors, seen = [], [], set()
         semaphore = asyncio.Semaphore(4)
-        async def provider(url, entry):
+        addon_limits = {}
+
+        async def query(url, source, kind):
+            name = source.get('name', 'Provider' if kind == 'providers' else 'Add-on')
             async with semaphore:
                 try:
-                    tmdb = movie.get('moviedb_id') or movie.get('tmdb_id')
-                    if not tmdb and movie['id'].startswith('tmdb:'):
-                        tmdb = movie['id'].split(':', 1)[1]
-                    if not tmdb:
-                        raise ValueError('Catalogue metadata has no TMDB ID for Nuvio providers')
-                    code = (await fetch_bytes(urljoin(url, entry['filename']))).decode()
-                    found = await run_plugin(code, str(tmdb))
-                    for stream in found[:30]:
-                        if isinstance(stream, dict) and isinstance(stream.get('url'), str):
-                            streams.append(dict(stream, provider=entry.get('name', 'Provider')))
+                    async with asyncio.timeout(PROVIDER_TIMEOUT):
+                        if kind == 'providers':
+                            tmdb = movie.get('moviedb_id') or movie.get('tmdb_id')
+                            if not tmdb and movie['id'].startswith('tmdb:'):
+                                tmdb = movie['id'].split(':', 1)[1]
+                            if not tmdb: raise ValueError('Missing TMDB ID')
+                            code = (await fetch_bytes(urljoin(url, source['filename']))).decode()
+                            found = await run_plugin(code, str(tmdb))
+                            return [dict(item, provider=name) for item in found[:30]
+                                    if isinstance(item, dict) and isinstance(item.get('url'), str)], None
+                        data = await fetch_json(urljoin(url, f'stream/movie/{quote(movie["id"], safe="")}.json'))
+                        found = []
+                        for item in data.get('streams', [])[:30]:
+                            if not isinstance(item, dict) or not isinstance(item.get('url'), str): continue
+                            hints = item.get('behaviorHints') or {}
+                            headers = (hints.get('proxyHeaders') or {}).get('request', {})
+                            description = str(item.get('description') or item.get('title') or '')
+                            candidate = re.sub(r'^\s*(?:\[[^\]]*\]\s*)+', '', description.split('\n')[0])
+                            filename = hints.get('filename') or (candidate if re.search(r'\.(mkv|mp4|avi|webm)\b', candidate, re.I) else None)
+                            found.append(dict(item, headers=item.get('headers', headers), provider=name,
+                                              size=item.get('size', hints.get('videoSize')), filename=filename))
+                        return found, None
                 except ProviderRuntimeError as exc:
-                    if str(exc) not in errors: errors.append(str(exc))
+                    return [], str(exc)
                 except Exception:
-                    errors.append(entry.get('name', 'Provider'))
-        jobs = []
-        for url, kind, manifest in self.manifests():
-            if kind == 'providers':
-                jobs.extend(provider(url, p) for p in manifest['scrapers'] if p.get('enabled', True) and 'movie' in p.get('supportedTypes', []))
-            else:
-                resources = manifest.get('resources', [])
-                if not any(r == 'stream' or isinstance(r, dict) and r.get('name') == 'stream' for r in resources): continue
+                    return [], name
+
+        async def addon_query(url, manifest):
+            origin = urlparse(url).netloc.lower()
+            limit = addon_limits.setdefault(origin, asyncio.Semaphore(1))
+            async with limit:
+                return await query(url, manifest, 'addon')
+
+        manifests = self.manifests()
+        tasks = set()
+        all_tasks = set()
+
+        def launch(coro):
+            task = asyncio.create_task(coro)
+            tasks.add(task)
+            all_tasks.add(task)
+
+        async def bootstrap(url, label):
+            # Setup never blocks already configured sources from returning results.
+            async with semaphore:
                 try:
-                    data = await fetch_json(urljoin(url, f'stream/movie/{quote(movie["id"], safe="")}.json'))
-                    for stream in data.get('streams', [])[:30]:
-                        if isinstance(stream, dict) and isinstance(stream.get('url'), str):
-                            headers = stream.get('behaviorHints', {}).get('proxyHeaders', {}).get('request', {})
-                            hints=stream.get('behaviorHints',{})
-                            description=str(stream.get('description') or stream.get('title') or '')
-                            candidate=re.sub(r'^\s*(?:\[[^\]]*\]\s*)+','',description.split('\n')[0])
-                            filename=hints.get('filename') or (candidate if re.search(r'\.(mkv|mp4|avi|webm)\b',candidate,re.I) else None)
-                            streams.append(dict(stream, headers=stream.get('headers', headers), provider=manifest.get('name', 'Add-on'),size=stream.get('size',hints.get('videoSize')),filename=filename))
+                    async with asyncio.timeout(PROVIDER_TIMEOUT):
+                        await self.add(url)
+                    return url, None
                 except Exception:
-                    errors.append(manifest.get('name', 'Add-on'))
-        tasks = [asyncio.create_task(job) for job in jobs]
-        if tasks:
-            try:
-                done, pending = await asyncio.wait(tasks, timeout=90)
-                if pending: errors.append('Some providers timed out')
-            finally:
-                for task in tasks:
-                    if not task.done(): task.cancel()
-                await asyncio.gather(*tasks, return_exceptions=True)
-        unique = {}
-        for stream in streams:
-            unique.setdefault(stream['url'], stream)
-        return list(unique.values()), errors
+                    return None, f'{label} could not be loaded'
+
+        for url, kind, manifest in manifests:
+            if kind == 'addon':
+                resources = manifest.get('resources', [])
+                if any(r == 'stream' or isinstance(r, dict) and r.get('name') == 'stream' for r in resources):
+                    launch(addon_query(url, manifest))
+        for url, kind, manifest in manifests:
+            if kind == 'providers':
+                for p in manifest['scrapers']:
+                    if p.get('enabled', True) and 'movie' in p.get('supportedTypes', []):
+                        launch(query(url, p, kind))
+        if not any(url == HDHUB for url, _, _ in manifests):
+            launch(bootstrap(HDHUB, 'HdHub add-on'))
+        if not any(kind == 'providers' for _, kind, _ in manifests):
+            launch(bootstrap(DEFAULT_PROVIDERS, 'Yoru providers'))
+        try:
+            async with asyncio.timeout(SEARCH_TIMEOUT):
+                while tasks:
+                    done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+                    tasks.difference_update(done)
+                    for task in done:
+                        found, error = await task
+                        if isinstance(found, str):
+                            # A fetched manifest contributes its sources immediately.
+                            for url, kind, manifest in self.manifests():
+                                if url != found: continue
+                                if kind == 'providers':
+                                    for p in manifest['scrapers']:
+                                        if p.get('enabled', True) and 'movie' in p.get('supportedTypes', []):
+                                            launch(query(url, p, kind))
+                                elif any(r == 'stream' or isinstance(r, dict) and r.get('name') == 'stream' for r in manifest.get('resources', [])):
+                                    launch(addon_query(url, manifest))
+                            continue
+                        fresh = []
+                        for item in found or []:
+                            if item['url'] not in seen:
+                                seen.add(item['url']); streams.append(item); fresh.append(item)
+                        if error and error not in errors: errors.append(error)
+                        if on_result and (fresh or error):
+                            await on_result(fresh, error)
+        except TimeoutError:
+            errors.append('Some providers timed out')
+        finally:
+            for task in all_tasks:
+                if not task.done(): task.cancel()
+            if all_tasks: await asyncio.gather(*all_tasks, return_exceptions=True)
+        return streams, errors
 
 
 class ProviderRuntimeError(RuntimeError):

@@ -10,11 +10,35 @@ Early foundation for a private Telegram media administrator. This is not yet the
 
 <!-- coderabbit-ai-generated-section:v1:87948aaa984bf25a9e6ce9d14879ae6030f10981f89d51340fc7beba15996bf7 -->
 
-A single configured admin can select a channel or group, send a direct HTTP(S) media URL, inspect its reported size, download a file within the 2000 MB limit, rename it, choose a thumbnail, and approve an upload. On a review preview, choose **Set thumbnail** and send a photo; review the new preview before approving. Telegram may ignore custom thumbnails for some file types or media without recognizable video dimensions. The upload uses the logged-in Telegram user account through MTProto, so the post is sent by that account. The selected account needs access to the destination. File transfers report progress, speed, and estimated time. `/status` shows CPU and memory, `/find` searches locally recorded published items, and `/saved` lists oversized links.
+<!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:cd08f449df7a869c6b60d71cde3044f59fd70464fd10e392552c1f10ad0ecdac -->
+
+The configured owner and any admins the owner adds can select a channel or group, send a direct HTTP(S) media URL, check it, download a file within the 2000 MB limit, rename it, choose a thumbnail, and approve an upload.
+
+<!-- /coderabbit-ai-generated:v1 --> On a review preview, choose **Set thumbnail** and send a photo; review the new preview before approving. Telegram may ignore custom thumbnails for some file types or media without recognizable video dimensions. The upload uses the logged-in Telegram user account through MTProto, so the post is sent by that account. The selected account needs access to the destination. File transfers report progress, speed, and estimated time. `/status` shows CPU and memory, `/find` searches locally recorded published items, and `/saved` lists oversized links.
 
 <!-- /coderabbit-ai-generated:v1 -->
 
-A download uses up to four HTTP byte-range connections when the server advertises range support and provides a stable validator. Otherwise it uses a single connection. Speed depends on the source and network. The MTProto uploader currently uses Telethon's standard uploader; parallel upload acceleration is not implemented.
+<!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:2adf38604fc3a0c26566982025949205956355cc4286313fa64c92dec101169b -->
+
+<!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:007bc17cda87143c84e1510467b74f3ab77596cf5107e8832ece0ddbd6f4737d -->
+
+A download uses up to four HTTP byte-range connections when the server advertises range support and provides a stable validator. No aria2 integration or transcoding is used; the verified filename supplies the displayed format, and ffprobe is not required.
+
+<!-- /coderabbit-ai-generated:v1 --> Otherwise it uses a single connection. Before saving and before downloading, the bot checks sources using a small byte range, validates public redirect destinations and reports unavailable, blocked, temporary and manual-only sources. It stops if a source ignores the range. Sources with unverified size cannot be downloaded. Download and upload progress messages show a progress bar, size, speed and ETA. Speed depends on the source and network. <!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:5c6486be6df86ece30017036307bec0b5962e0051a14f003b07fa5197b195b4f -->
+
+The MTProto uploader uses Telethon's standard uploader by default. An experimental option sends several file parts concurrently through the same user session; see **Experimental upload speed** below.
+
+<!-- /coderabbit-ai-generated:v1 -->
+
+<!-- /coderabbit-ai-generated:v1 -->
 
 <!-- coderabbit-ai-generated:v1 -->
 
@@ -22,7 +46,15 @@ A download uses up to four HTTP byte-range connections when the server advertise
 
 ## Transfer controls and menu
 
-Use **Start transfers** and **Stop transfers** to allow or block new downloads and uploads. The setting persists across restarts. A running transfer finishes when stopped; another transfer requested while one is running must be retried after it finishes. Search, saved links and destination selection remain available while transfers are off. Uploads still require individual approval. <!-- coderabbit-ai-generated:v1 -->
+<!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:c1e59b9411bb3c153bf6f6bab780accf4529ece171cfb3015681456d2efe2204 -->
+
+Send `/start` to remove the old bottom keyboard and open the inline menu. Send a movie title in the private chat to search. Use **Admin management** to list, add or remove numeric Telegram user IDs; only the configured owner can change admins, and the list is stored in the database. Each admin must start a private chat with the bot.
+
+Use **Start transfers** and **Stop transfers** to allow or block new downloads and uploads. The setting persists across restarts. One transfer runs at a time, and menus and searches remain usable during it. **Active transfers** shows and cancels the current transfer. A cancelled or failed upload may already be present on Telegram: inspect the destination before retrying. A running transfer finishes when transfers are switched off. Uploads still require individual approval.
+
+<!-- /coderabbit-ai-generated:v1 --> <!-- coderabbit-ai-generated:v1 -->
 
 <!-- coderabbit-ai-generated-section:v1:de2ef4aa517506ef486208025498897c72c699345fbdfbeeb4d9425d402ff666 -->
 
@@ -137,7 +169,13 @@ Open **Add-ons** (or `/addons`) and send a Stremio catalogue manifest URL, or up
 
 <!-- /coderabbit-ai-generated:v1 --> For example, Cinemeta: `https://v3-cinemeta.strem.io/manifest.json`. The catalogue must advertise a movie catalogue with a `search` extra. For Nuvio plugins, movie metadata must include `moviedb_id`, `tmdb_id`, or a `tmdb:` ID.
 3. Add a Nuvio repository URL in the same menu, or use **Add Yoru providers**. The supplied Yoru repository is loaded automatically on the first source lookup if no Nuvio repository has been saved. Manifests persist in the database. Provider scripts are fetched when looking up streams.
-4. Send a movie name or `/search Insidious`. Select the correct movie; the bot fetches details and sources, then shows landscape artwork and buttons with file quality, reported/verified size and format. A size labelled unknown is rechecked before download. Search alone never downloads or uploads media.
+<!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:8619b6da6c26c4ffaea9d24c3732550a9255337a3f2ce19ac84fd333b501d1d2 -->
+
+4. Send a movie name or `/search Insidious`. Select the correct movie; the bot checks sources concurrently and shows checked files as they become available, with landscape artwork where available. Source lookup uses at most four concurrent providers, a 30-second per-provider timeout and a 90-second overall timeout. Add-ons on the same host are queried one at a time. Manifest and movie metadata responses are cached in memory for 60 seconds; file availability and access are still checked before downloads. A size labelled unknown is rechecked before download. Search alone never downloads or uploads media.
+
+<!-- /coderabbit-ai-generated:v1 -->
 5. <!-- coderabbit-ai-generated:v1 -->
 
 <!-- coderabbit-ai-generated-section:v1:f170a0d2386266b1c93feccf8ae6db1313ece5396e76a4191a369342198d36de -->
@@ -145,7 +183,13 @@ Open **Add-ons** (or `/addons`) and send a Stremio catalogue manifest URL, or up
 File choices show four per page with More/Previous and Cancel. Select a **DW** button to see catalogue details, the actual source filename and verified size, then choose Yes or No. Only Yes starts a download. A separate approval is required before upload. Downloads show the actual filename, downloaded/total bytes, speed and ETA every five seconds, including during stalls, and send a completion notice. The local file is then renamed using the catalogue title, year, detected quality/codec and language labels. Source headers and alternative URLs are retained. Versions above 2000 MB return a saved link for manual download and never enter the download/upload path.
 
 <!-- /coderabbit-ai-generated:v1 -->
-6. **Library search** and `/find` search previously published records. **Search** searches online catalogues. Both work with transfers off.
+6. <!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:47886b2bd16ef26c9b0fd1206b19ff93c9818d3878a30600dd0adf62ca036a75 -->
+
+**Library search** and `/find` search previously published records. Send a movie title or use `/search` to search online catalogues. Both work with transfers off.
+
+<!-- /coderabbit-ai-generated:v1 -->
 
 For Telegram inline search, enable inline mode for the bot through BotFather (`/setinline`). Type `@your_bot_username Insidious` in Telegram. Results include a **View available files** button that opens the private bot. Inline results are restricted to the configured admin; <!-- coderabbit-ai-generated:v1 -->
 
@@ -163,7 +207,19 @@ Nuvio scripts run in a Bubblewrap-isolated Node process with a private network n
 
 <!-- /coderabbit-ai-generated:v1 -->
 
+<!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:611db00e8b6213770324c61d70aa7ed403c86b4e5ca47895b0f6508470e28849 -->
+
+## Experimental upload speed
+
+The bot already uploads using your Telegram user account. To try sending several large-file parts concurrently, set `UPLOAD_PARALLEL_PARTS=4` in `.env` and restart the Python bot. Values `2` through `4` enable the experiment for files larger than 10 MiB; `1` (the default) uses the standard uploader. These are concurrent requests on the existing user session, not four separate TCP connections. Smaller files use the standard uploader.
+
+Compare the progress speeds on similarly sized uploads on your own connection. Actual speed depends on the connection and Telegram; no improvement is guaranteed and the experimental mode has not been tested against live Telegram. If it fails or performs worse, set the value back to `1` and restart. If an upload outcome is unknown, check the destination before trying again. The experiment preserves the separate upload approval and does not automatically retry a publication.
+
 ## Testing
+
+<!-- /coderabbit-ai-generated:v1 -->
 
 <!-- /coderabbit-ai-generated:v1 -->
 
