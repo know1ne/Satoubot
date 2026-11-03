@@ -1,3 +1,4 @@
+import asyncio
 import json
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
@@ -68,9 +69,18 @@ async def test_file_callback_respects_off_and_unknown_size_never_downloads(tmp_p
     bot = Bot(store, tmp_path, 42, MagicMock())
     q = MagicMock(); q.data = f'file:{key}'; q.answer = AsyncMock(); q.message.reply_text = AsyncMock()
     update = MagicMock(); update.effective_user.id=42; update.effective_chat.type='private'; update.callback_query=q
-    await bot.callback(update, MagicMock())
+    context=MagicMock();context.bot.send_message=AsyncMock()
+    bot.prepare_choice=AsyncMock()
+    await bot.callback(update, context)
+    await asyncio.gather(*bot.discovery_tasks)
+    bot.prepare_choice.assert_awaited_once()
+    assert not bot.tasks
+    # Transfer approval itself remains gated while off.
+    confirmation=store.cache('confirmation',stream)
+    q.data=f'yes:{confirmation}'
+    await bot.callback(update,context)
     assert not bot.tasks and 'off' in q.message.reply_text.await_args.args[0]
-    monkeypatch.setattr('satoubot.catalogue.inspect_url', AsyncMock(side_effect=ValueError()))
+    del bot.prepare_choice
     context = MagicMock(); context.bot.send_message=AsyncMock()
     await bot.download_choice(context, stream)
     assert not store.find_source(stream['url'])

@@ -50,6 +50,9 @@ class UploadFunctions:
                 upload_file = await upload_parts(self.uploader, job['path'], job['size'], self.upload_parallel_parts, progress)
             result = await self.uploader.send_file(int(job['target']), upload_file, caption=job['title'], thumb=job['thumbnail'] or None, progress_callback=progress, **extra)
             self.store.update(job_id, state='published', telegram_message_id=result.id)
+            self.daily_init()
+            self.store.db.execute("UPDATE daily_titles SET state='published', published_day=? WHERE job_id=?", (self.daily_day(), job_id))
+            self.store.db.commit()
         except asyncio.CancelledError:
             self.store.update(job_id, state='upload_unknown', error='Cancelled')
             if message:

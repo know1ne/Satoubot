@@ -23,10 +23,11 @@ class DownloadFunctions:
         if info.get('status') != 'ready' or not info.get('size'):
             reason=info.get('reason','Size unknown')
             retry=info.get('retry_after')
-            keyboard=None
+            manual = self.store.cache('manual_link', {'url':text})
+            keyboard=InlineKeyboardMarkup([[InlineKeyboardButton('Give link', callback_data=f'directmanual:{manual}')], navigation()])
             if info.get('status') == 'temporary':
                 key=self.store.cache('direct_retry', {'url':text})
-                keyboard=InlineKeyboardMarkup([[InlineKeyboardButton('Retry check', callback_data=f'directretry:{key}')], navigation()])
+                keyboard=InlineKeyboardMarkup([[InlineKeyboardButton('Retry check', callback_data=f'directretry:{key}'), InlineKeyboardButton('Give link', callback_data=f'directmanual:{manual}')], navigation()])
             await update.message.reply_text(f"{reason}." + (f" Retry after {retry}." if retry else ''), reply_markup=keyboard)
             return
         size, content_type=info['size'],info.get('content_type','')
@@ -42,7 +43,7 @@ class DownloadFunctions:
             return
         name = info.get('filename') or filename_from_url(text)
         job = self.store.create(text, Path(name).stem, name, size)
-        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton('Yes', callback_data=f'dl:{job}'), InlineKeyboardButton('No', callback_data=f'skip:{job}')], navigation()])
+        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton('Transfer', callback_data=f'dl:{job}'), InlineKeyboardButton('Give link', callback_data=f'directlink:{job}'), InlineKeyboardButton('No', callback_data=f'skip:{job}')], navigation()])
         await update.message.reply_text(f'Item #{job}\nName: {name}\nEstimated size: {size / 1_000_000:.1f} MB\nDownload this file?', reply_markup=keyboard)
 
 
@@ -89,6 +90,10 @@ class DownloadFunctions:
             if check.get('status') != 'ready' or check.get('size') != job['size']:
                 self.store.update(job_id, state='failed', error='Source changed')
                 await context.bot.send_message(self.admin_id, f"Link status changed: {check.get('reason','size changed')}. Search again before retrying.")
+                return
+            if not self.transfers_enabled():
+                self.store.update(job_id, state='cancelled', error='Transfers switched off')
+                if message: await message.edit_text('Transfers are off. Download cancelled before starting.')
                 return
             stage='Transferring'
             await download(job['source'], path, job['size'], progress, headers=source_headers)

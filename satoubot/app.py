@@ -30,6 +30,7 @@ from .discovery import Discovery
 from .menu import MenuFunctions, navigation
 from .interface import InterfaceFunctions
 from .series import SeriesFunctions
+from .daily import DailyFunctions
 
 log = logging.getLogger('satoubot')
 current_admin = contextvars.ContextVar('current_admin', default=None)
@@ -47,7 +48,7 @@ def admin_session(handler):
     return wrapped
 
 
-class Bot(SeriesFunctions, InterfaceFunctions, MenuFunctions, DestinationFunctions, CatalogueFunctions, DownloadFunctions, UploadFunctions, SearchFunctions, GroupManagementFunctions, MigrationFunctions):
+class Bot(DailyFunctions, SeriesFunctions, InterfaceFunctions, MenuFunctions, DestinationFunctions, CatalogueFunctions, DownloadFunctions, UploadFunctions, SearchFunctions, GroupManagementFunctions, MigrationFunctions):
     def __init__(self, store, media_dir, admin_id, uploader, upload_parallel_parts=1):
         self.store, self.media_dir, self.owner_id, self.uploader = store, media_dir, admin_id, uploader
         if not 1 <= upload_parallel_parts <= 4:
@@ -128,7 +129,7 @@ class Bot(SeriesFunctions, InterfaceFunctions, MenuFunctions, DestinationFunctio
         if text == 'Help': return await self.start(update, context)
         if text in ('Start transfers', 'Stop transfers'):
             enabled = text == 'Start transfers'
-            self.store.set_setting('transfers_enabled', '1' if enabled else '0')
+            self.set_transfers(enabled)
             notice = ' Transfers already running will finish.' if not enabled and self.transfer_busy() else ''
             await update.message.reply_text(f'Transfers are {"on" if enabled else "off"}.{notice}')
             return
@@ -170,6 +171,19 @@ class Bot(SeriesFunctions, InterfaceFunctions, MenuFunctions, DestinationFunctio
         if not self.authorized(update): return
         q = update.callback_query
         await q.answer()
+        if q.data.startswith('daily:'):
+            return await self.daily_callback(update, context)
+        if q.data.startswith('directmanual:'):
+            try: entry = self.store.cached(int(q.data.split(':')[1]), 'manual_link')
+            except ValueError: return
+            if entry: await q.message.reply_text(entry['url'], disable_web_page_preview=True)
+            return
+        if q.data.startswith('directlink:'):
+            try: job = self.store.get(int(q.data.split(':')[1]))
+            except ValueError: return
+            if job:
+                await q.message.reply_text(job['source'], disable_web_page_preview=True)
+            return
         if q.data.startswith(('season:', 'seasons:')):
             return await self.series_callback(update, context)
         if q.data.startswith(('addonpage:', 'addonproviders:', 'addontoggle:')):
@@ -185,7 +199,7 @@ class Bot(SeriesFunctions, InterfaceFunctions, MenuFunctions, DestinationFunctio
             return await self.menu_callback(update, context)
         if q.data == 'destcancel' or q.data.startswith(('dest:', 'choose_dest:')):
             return await self.select_destination(update, context)
-        if q.data in ('defaultproviders', 'searchagain') or q.data.startswith(('movie:', 'file:', 'retryfile:', 'page:', 'cancelpage:', 'yes:', 'no:')):
+        if q.data in ('defaultproviders', 'searchagain') or q.data.startswith(('movie:', 'file:', 'retryfile:', 'page:', 'cancelpage:', 'yes:', 'no:', 'link:')):
             return await self.catalogue_callback(update, context)
         try:
             parts = q.data.split(':')
@@ -376,7 +390,12 @@ def main():
     async def post_init(app):
         await sessions.start()
         bot.cleanup_task = asyncio.create_task(bot.panel_cleaner())
+        bot.daily_task = asyncio.create_task(bot.daily_loop(app.bot))
     async def post_shutdown(app):
+        daily_task = getattr(bot, 'daily_task', None)
+        if daily_task:
+            daily_task.cancel()
+            await asyncio.gather(daily_task, return_exceptions=True)
         cleanup_task = getattr(bot, 'cleanup_task', None)
         if cleanup_task:
             cleanup_task.cancel()

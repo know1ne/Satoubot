@@ -96,7 +96,17 @@ Download, upload, search, group management, migration and user session code are 
 
 <!-- coderabbit-ai-generated-section:v1:cf34a90fefbf7919e4ed1107ac01d867678b19c86c155b6e0980465019350997 -->
 
-Movie-name search and automatic catalogue artwork are available through supported Stremio catalogue manifests. Scheduled daily discovery is still pending.
+Movie-name search and automatic catalogue artwork are available through supported Stremio catalogue manifests. <!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:a9909a0ddbb13203dc5ec387e8337f0097a13ca52ec5674628a17fcd553b7f28 -->
+
+Daily Uploads uses the Transfers switch to activate release selection. Open Daily Uploads, choose 4–10 successful uploads per UTC day (default 4), select a channel, and press Start daily transfers. An explicit start activates daily selection on existing installations; it does not start merely because the old transfer setting is already on. The bot browses up to four movie catalogues per enabled add-on, prioritizing recent/new/release/trending catalogue IDs, and sorts titles with catalogue dates from the past 90 days. Availability and release dates depend on the catalogue. This first version selects movies, not automatic episode batches.
+
+One release is offered at a time. Only verified files strictly below 2,000,000,000 bytes appear in Daily Upload choices. Choose a quality/file, press Transfer, then review the name, landscape thumbnail and destination before approving upload. Rename and thumbnail controls remain available before upload starts. Give link returns the source for manual handling and never starts a transfer. Single manual transfers do not contribute to the daily quota.
+
+Daily selections, skipped/no-file titles, title IDs and conservative title/year duplicate checks persist. The next release is checked after upload/skip; a catalogue scan with no candidates waits ten minutes. A failed or uncertain transfer is marked for attention and is never retried automatically. A pending release can be reopened or skipped from Daily Uploads after restart. At the daily quota the bot switches Transfers off; explicitly start another cycle on a later day. Stop transfers prevents new downloads/uploads; already running transfers can finish. Counts use UTC. This is an approval-driven cycle: it cannot publish 4–10 files without your approvals.
+
+<!-- /coderabbit-ai-generated:v1 -->
 
 <!-- /coderabbit-ai-generated:v1 -->
 
@@ -178,7 +188,13 @@ This foundation is not configured to start automatically with the PC. A publishe
 
 <!-- coderabbit-ai-generated-section:v1:bcf4cec059eae3e6359b3e9dc943e80d96947af0988b3bb6a1fd372c18e336fa -->
 
-Automatic daily discovery, inline retrieval of already published Telegram files, migration, source refresh, torrent, DASH and M3U8 downloads, generic download-page extraction, automated error retries and channel availability monitoring are not implemented yet. Search can list HTTP links returned by providers; unsupported formats and files above 2000 MB are saved as links. A size that cannot be verified prevents downloading. Provider success depends on source availability and compatibility; plugin settings screens are not implemented.
+<!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:2f6ec2ef61772189d265c825017265380efd5c6d9a26ce38492c8508f018fb3d -->
+
+Inline retrieval of already published Telegram files, migration, source refresh, torrent, DASH and M3U8 downloads, generic download-page extraction, automated error retries and channel availability monitoring are not implemented yet.
+
+<!-- /coderabbit-ai-generated:v1 --> Search can list HTTP links returned by providers; unsupported formats and files above 2000 MB are saved as links. A size that cannot be verified prevents downloading. Provider success depends on source availability and compatibility; plugin settings screens are not implemented.
 
 <!-- /coderabbit-ai-generated:v1 -->
 

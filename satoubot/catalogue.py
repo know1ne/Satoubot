@@ -239,6 +239,7 @@ class CatalogueFunctions:
                 except Exception:
                     stream['check_status'] = 'temporary'
                     stream['check_reason'] = 'Link check failed'
+            if movie.get('daily_identity') and not (stream.get('check_status') == 'ready' and stream.get('size_verified') and 0 < stream.get('size', 0) < MAX_BYTES): return
             async with lock:
                 if self.store.cached(selection, 'pages') is None: return
                 # Keep unverified and failed links out of the persistent ready list.
@@ -276,6 +277,9 @@ class CatalogueFunctions:
                 await asyncio.gather(pending_render, return_exceptions=True)
             async with lock:
                 await render(final=True)
+                if movie.get('daily_identity') and not source_ids:
+                    self.daily_init()
+                    self.store.db.execute("UPDATE daily_titles SET state='no_files' WHERE identity=? AND state='offered'", (movie['daily_identity'],)); self.store.db.commit()
         finally:
             if pending_render and not pending_render.done(): pending_render.cancel()
             if pending_render: await asyncio.gather(pending_render, return_exceptions=True)
@@ -315,6 +319,9 @@ class CatalogueFunctions:
             self.store.db.execute("DELETE FROM discovery_cache WHERE id=? AND kind='pages'",(key,));self.store.db.commit()
             await q.edit_message_reply_markup(reply_markup=None)
             await self.main_menu(q.message)
+        elif action == 'link':
+            stream = self.store.cached(key, 'confirmation')
+            if stream: await context.bot.send_message(self.admin_id, stream['url'], disable_web_page_preview=True)
         elif action in ('yes', 'no'):
             stream = self.store.cached(key, 'confirmation')
             if not stream:
@@ -332,8 +339,6 @@ class CatalogueFunctions:
             stream = self.store.cached(key, 'unchecked' if action == 'retryfile' else 'stream')
             if not stream:
                 await q.message.reply_text('File result expired. Use /search again.'); return
-            if not (isinstance(stream.get('size'),(int,float)) and stream['size']>MAX_BYTES):
-                if not await self.transfer_gate(q.message): return
             await self.start_panel_task('file', f'Checking {stream.get("filename") or stream["movie"]["name"]}…', lambda: self.prepare_choice(context, stream), context)
 
     def file_page(self, selection, ids, page):
@@ -387,7 +392,7 @@ class CatalogueFunctions:
                 await context.bot.send_message(self.admin_id,f"{clean_title(stream['movie'],stream)}\n{actual}\n{size/1_000_000:.1f} MB — above 2000 MB. Saved as a link. Download it manually.\n{stream['url']}",disable_web_page_preview=True)
                 return
             key=self.store.cache('confirmation',stream)
-            await context.bot.send_message(self.admin_id,f"Download this file?\nCatalogue: {clean_title(stream['movie'],stream)}\nActual file: {stream['filename']}\nSize: {size/1_000_000:.1f} MB\nFormat: {stream.get('file_type','unknown')}\nSource: {stream.get('provider','unknown')}",reply_markup=Markup([[Button('Yes',callback_data=f'yes:{key}'),Button('No',callback_data=f'no:{key}')], navigation()]))
+            await context.bot.send_message(self.admin_id,f"Download this file?\nCatalogue: {clean_title(stream['movie'],stream)}\nActual file: {stream['filename']}\nSize: {size/1_000_000:.1f} MB\nFormat: {stream.get('file_type','unknown')}\nSource: {stream.get('provider','unknown')}",reply_markup=Markup([[Button('Transfer',callback_data=f'yes:{key}'),Button('Give link',callback_data=f'link:{key}'),Button('No',callback_data=f'no:{key}')], navigation()]))
         except Exception:
             await context.bot.send_message(self.admin_id,'Could not verify this source and its size. No download started. Try another link.')
 
@@ -414,13 +419,31 @@ class CatalogueFunctions:
             await context.bot.send_message(self.admin_id, f"Link status changed: {info.get('reason','size unknown')}. Search again to retry."); return
         if stream.get('confirmed_size') and size != stream['confirmed_size']:
             await context.bot.send_message(self.admin_id, 'The source size changed. Select the file again to review it.'); return
+        if not self.transfers_enabled():
+            await context.bot.send_message(self.admin_id, 'Transfers are off. No download started.'); return
         movie = stream['movie']
+        if movie.get('daily_identity'):
+            self.daily_init()
+            row = self.store.db.execute("SELECT state FROM daily_titles WHERE identity=?", (movie['daily_identity'],)).fetchone()
+            if not row or row[0] != 'offered':
+                await context.bot.send_message(self.admin_id, 'This daily selection is no longer active.'); return
+        title_identity = movie.get('type', 'movie') + ':' + (movie.get('video_id') or movie.get('id') or url)
+        existing_title = self.store.setting('title:' + title_identity)
+        previous = self.store.get(int(existing_title)) if existing_title else None
+        if previous and previous['state'] not in ('failed', 'cancelled'):
+            await context.bot.send_message(self.admin_id, 'This title is already recorded. Check Upload approvals or the library.'); return
         quality = str(stream.get('quality') or stream.get('title') or 'unknown')[:80]
         suffix = Path(stream.get('filename') or urlparse(url).path).suffix.lower()
         if suffix not in ('.mp4', '.mkv', '.avi', '.mov', '.webm', '.m4v'): suffix = '.mp4'
         title = clean_title(movie,stream)
         filename = safe_name(title) + suffix
         job = self.store.create(url, title, filename, size)
+        self.store.set_setting('title:' + title_identity, job)
+        if movie.get('type', 'movie') == 'movie':
+            from .daily import daily_title_alias
+            self.store.set_setting(daily_title_alias(movie), 'job:' + str(job))
+        if movie.get('daily_identity'):
+            self.store.db.execute("UPDATE daily_titles SET state='transferring', job_id=? WHERE identity=?", (job, movie['daily_identity'])); self.store.db.commit()
         if identity: self.store.set_setting(f'job:{job}:identity',identity)
         self.store.set_setting(f'job:{job}:original',stream.get('filename') or filename)
         self.store.set_setting(f'job:{job}:headers', json.dumps(stream.get('headers') or {}))

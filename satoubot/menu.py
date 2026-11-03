@@ -18,7 +18,7 @@ class MenuFunctions:
                 [Button('Add-ons', callback_data='menu:addons'), Button('Saved links', callback_data='menu:saved')],
                 [Button('Library search', callback_data='menu:library'), Button('My channels', callback_data='menu:channels')],
                 [Button('Active transfers', callback_data='menu:active'), Button('Admin management', callback_data='menu:admins')],
-                [Button('Migration', callback_data='menu:migration')],
+                [Button('Daily Uploads', callback_data='menu:daily'), Button('Migration', callback_data='menu:migration')],
                 [Button('Stop transfers' if self.transfers_enabled() else 'Start transfers', callback_data='menu:toggle')]]
         await self.show_panel(message, f'Main menu · Transfers {state}\nSend a movie title to search catalogues.', reply_markup=Markup(rows))
 
@@ -78,6 +78,7 @@ class MenuFunctions:
         if action in ('main','cancel'):
             self.clear_prompt(context)
             await self.main_menu(q.message);return
+        if action == 'daily': return await self.daily_menu(q.message, context)
         if action == 'active': return await self.active_menu(q.message)
         if action == 'canceltransfer':
             active=[t for t in self.tasks if not t.done()]
@@ -93,7 +94,7 @@ class MenuFunctions:
             self.clear_prompt(context);context.user_data['admin_add_pending']=True
             await self.show_panel(q.message, 'Send the numeric Telegram user ID.',reply_markup=Markup([navigation()]));return
         if action == 'toggle':
-            self.store.set_setting('transfers_enabled','0' if self.transfers_enabled() else '1')
+            self.set_transfers(not self.transfers_enabled())
             return await self.main_menu(q.message)
         self.clear_prompt(context)
         proxy=SimpleNamespace(message=q.message,effective_user=update.effective_user,effective_chat=update.effective_chat)
