@@ -3,7 +3,7 @@ from telegram import InlineKeyboardButton as Button, InlineKeyboardMarkup as Mar
 
 
 def navigation():
-    return [Button('Back', callback_data='menu:main'), Button('Cancel', callback_data='menu:cancel'), Button('Main menu', callback_data='menu:main')]
+    return [Button('Back', callback_data='menu:back'), Button('Cancel', callback_data='menu:cancel'), Button('Main menu', callback_data='menu:main')]
 
 
 class MenuFunctions:
@@ -18,16 +18,17 @@ class MenuFunctions:
                 [Button('Add-ons', callback_data='menu:addons'), Button('Saved links', callback_data='menu:saved')],
                 [Button('Library search', callback_data='menu:library'), Button('My channels', callback_data='menu:channels')],
                 [Button('Active transfers', callback_data='menu:active'), Button('Admin management', callback_data='menu:admins')],
+                [Button('Migration', callback_data='menu:migration')],
                 [Button('Stop transfers' if self.transfers_enabled() else 'Start transfers', callback_data='menu:toggle')]]
-        await message.reply_text(f'Main menu · Transfers {state}\nSend a movie title to search catalogues.', reply_markup=Markup(rows))
+        await self.show_panel(message, f'Main menu · Transfers {state}\nSend a movie title to search catalogues.', reply_markup=Markup(rows))
 
     async def admin_menu(self, message, user_id):
         if user_id != self.owner_id:
-            await message.reply_text('Only the owner can manage admins.', reply_markup=Markup([navigation()])); return
+            await self.show_panel(message, 'Only the owner can manage admins.', reply_markup=Markup([navigation()])); return
         ids = [row[0] for row in self.store.db.execute('SELECT user_id FROM admins ORDER BY user_id')]
         rows = [[Button(f'Remove {uid}', callback_data=f'adminremove:{uid}')] for uid in ids]
         rows += [[Button('Add admin', callback_data='menu:addadmin')], navigation()]
-        await message.reply_text(f'Owner: {self.owner_id}\nAdmins: ' + (', '.join(map(str, ids)) or 'none'), reply_markup=Markup(rows))
+        await self.show_panel(message, f'Owner: {self.owner_id}\nAdmins: ' + (', '.join(map(str, ids)) or 'none'), reply_markup=Markup(rows))
 
     async def active_menu(self, message):
         tasks = [task for task in self.tasks if not task.done()]
@@ -35,17 +36,45 @@ class MenuFunctions:
         if tasks: rows.append([Button('Cancel transfer', callback_data='menu:canceltransfer')])
         rows.append(navigation())
         label = getattr(self, 'active_description', 'Transfer in progress') if tasks else 'No active transfers.'
-        await message.reply_text(label, reply_markup=Markup(rows))
+        await self.show_panel(message, label, reply_markup=Markup(rows))
 
     async def menu_callback(self, update, context):
         q=update.callback_query; action=q.data.split(':',1)[1]
         if q.data.startswith('adminremove:'):
             if update.effective_user.id != self.owner_id:
-                await q.message.reply_text('Only the owner can manage admins.');return
+                await self.show_panel(q.message, 'Only the owner can manage admins.');return
             try: uid=int(action)
             except ValueError:return
             self.store.db.execute('DELETE FROM admins WHERE user_id=?',(uid,));self.store.db.commit()
             await self.admin_menu(q.message, update.effective_user.id);return
+        if action.startswith('review:'):
+            try: job_id = int(action.split(':')[1])
+            except ValueError: return
+            return await self.preview(context, job_id)
+        if action.startswith('savedpage:'):
+            try: page = int(action.split(':')[1])
+            except ValueError: return
+            proxy = SimpleNamespace(message=q.message, effective_user=update.effective_user, effective_chat=update.effective_chat)
+            return await self.saved(proxy, context, page)
+        if action.startswith('savedjob:'):
+            try: job = self.store.get(int(action.split(':')[1]))
+            except ValueError: return
+            if job and job['state'] in ('oversize', 'reported', 'link_only'):
+                await q.message.reply_text(f'{job["filename"]} · {job["size"]/1_000_000:.1f} MB\n{job["source"]}', disable_web_page_preview=True)
+            return
+        if action == 'back':
+            self.clear_prompt(context)
+            return await self.panel_back(q.message, context)
+        if action.startswith('results:'):
+            try: key = int(action.split(':')[1])
+            except ValueError: return
+            result = self.store.cached(key, 'search_panel')
+            if not result:
+                return await self.show_panel(q.message, 'Results expired. Send a movie title to search again.', reply_markup=Markup([navigation()]))
+            rows = [[Button(label, callback_data=data)] for label, data in result['buttons']]
+            rows.append(navigation())
+            self.panel().results.pop(key, None)
+            return await self.show_panel(q.message, result['text'], reply_markup=Markup(rows))
         if action in ('main','cancel'):
             self.clear_prompt(context)
             await self.main_menu(q.message);return
@@ -54,15 +83,15 @@ class MenuFunctions:
             active=[t for t in self.tasks if not t.done()]
             if active:
                 for task in active: task.cancel()
-                await q.message.reply_text('Cancellation requested. An upload may already have reached Telegram; check the destination before retrying.')
-            else: await q.message.reply_text('No active transfers.')
+                await self.show_panel(q.message, 'Cancellation requested. An upload may already have reached Telegram; check the destination before retrying.')
+            else: await self.show_panel(q.message, 'No active transfers.')
             return await self.active_menu(q.message)
         if action == 'admins': return await self.admin_menu(q.message, update.effective_user.id)
         if action == 'addadmin':
             if update.effective_user.id != self.owner_id:
-                await q.message.reply_text('Only the owner can manage admins.');return
+                await self.show_panel(q.message, 'Only the owner can manage admins.');return
             self.clear_prompt(context);context.user_data['admin_add_pending']=True
-            await q.message.reply_text('Send the numeric Telegram user ID.',reply_markup=Markup([navigation()]));return
+            await self.show_panel(q.message, 'Send the numeric Telegram user ID.',reply_markup=Markup([navigation()]));return
         if action == 'toggle':
             self.store.set_setting('transfers_enabled','0' if self.transfers_enabled() else '1')
             return await self.main_menu(q.message)
@@ -70,11 +99,12 @@ class MenuFunctions:
         proxy=SimpleNamespace(message=q.message,effective_user=update.effective_user,effective_chat=update.effective_chat)
         if action == 'download':
             text='A transfer is active. Wait before starting another.' if self.transfer_busy() else 'Send a direct HTTP(S) media link.'
-            await q.message.reply_text(text,reply_markup=Markup([navigation()]));return
+            await self.show_panel(q.message, text,reply_markup=Markup([navigation()]));return
         if action == 'library':
             context.user_data['search_pending']=True
-            await q.message.reply_text('Send a title to search your published library.',reply_markup=Markup([navigation()]));return
-        await q.message.reply_text('Choose an action or return to the main menu.',reply_markup=Markup([navigation()]))
+            await self.show_panel(q.message, 'Send a title to search your published library.',reply_markup=Markup([navigation()]));return
+        if action == 'addmanifest': return await self.add_manifest_prompt(proxy,context)
+        if action == 'migration': return await self.migration_menu(proxy,context)
         if action == 'addons': return await self.addons(proxy,context)
         if action == 'saved': return await self.saved(proxy,context)
         if action == 'pending': return await self.pending(proxy,context)

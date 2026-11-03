@@ -45,7 +45,10 @@ lines.on('line', async line => {
     });
     new vm.Script(input.code).runInContext(context, {timeout: 2000});
     context.tmdb = input.tmdb;
-    const results = await new vm.Script('module.exports.getStreams(tmdb, "movie", null, null)').runInContext(context, {timeout: 2000});
+    context.mediaType = input.mediaType || 'movie';
+    context.season = input.season ?? null;
+    context.episode = input.episode ?? null;
+    const results = await new vm.Script('module.exports.getStreams(tmdb, mediaType, season, episode)').runInContext(context, {timeout: 2000});
     const output = JSON.stringify({type: 'result', results});
     if (output.length > 2000000) throw new Error('Too many results');
     process.stdout.write(output + '\n', () => process.exit(0));

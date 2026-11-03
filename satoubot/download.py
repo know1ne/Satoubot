@@ -69,9 +69,11 @@ class DownloadFunctions:
                 try:
                     if message:
                         await message.edit_text(format_progress(f'{stage} download #{job_id}',original,done_bytes,job['size'],speed))
+                    await self.panel_status(context, 'transfer', format_progress(f'{stage} download #{job_id}', original, done_bytes, job['size'], speed))
                 except Exception: pass
         timer=asyncio.create_task(ticker())
         try:
+            await self.panel_status(context, 'transfer', f'Downloading #{job_id} · {original}')
             folder = self.media_dir / str(job_id)
             folder.mkdir(exist_ok=True)
             path = folder / safe_name(original)
@@ -111,6 +113,7 @@ class DownloadFunctions:
         finally:
             timer.cancel()
             await asyncio.gather(timer,return_exceptions=True)
+            await self.panel_status(context, 'transfer')
         try:
             await context.bot.send_message(self.admin_id,f'Download done: {original} ({job["size"]/1_000_000:.1f} MB). Review the proposed upload name below.')
             await self.preview(context, job_id)

@@ -116,6 +116,8 @@ async def probe(url, headers=None):
 
 def clean_title(movie, stream):
     title=str(movie.get('name','Movie'))
+    if movie.get('season') is not None:
+        title += f' S{int(movie["season"]):02d}E{int(movie["episode"]):02d}'
     year=str(movie.get('year') or movie.get('releaseInfo') or '')[:4]
     details=' '.join(str(stream.get(k) or '') for k in ('quality','title','name','filename','language','description'))
     details=re.sub(r'[._-]+',' ',details)

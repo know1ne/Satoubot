@@ -14,9 +14,11 @@ class UploadFunctions:
     async def perform_upload(self, context, job_id):
         job = self.store.get(job_id)
         try:
+            await self.panel_status(context, 'transfer', f'Uploading #{job_id} · {job["filename"]}')
             message = await context.bot.send_message(self.admin_id, f'Connecting upload #{job_id}\n{job["filename"]}')
         except asyncio.CancelledError:
             self.store.update(job_id, state='upload_unknown', error='Cancelled')
+            await self.panel_status(context, 'transfer')
             raise
         except Exception as exc:
             message = None
@@ -35,6 +37,7 @@ class UploadFunctions:
                 try:
                     if message:
                         await message.edit_text(format_progress(f'Transferring upload #{job_id}',job['filename'],done_bytes,total_bytes,speed))
+                    await self.panel_status(context, 'transfer', format_progress(f'Transferring upload #{job_id}', job['filename'], done_bytes, total_bytes, speed))
                 except Exception:
                     pass
         timer = asyncio.create_task(ticker())
@@ -65,6 +68,7 @@ class UploadFunctions:
         finally:
             timer.cancel()
             await asyncio.gather(timer,return_exceptions=True)
+            await self.panel_status(context, 'transfer')
         if message:
             try: await message.edit_text(f'Upload completed: {job["filename"]}')
             except Exception: pass

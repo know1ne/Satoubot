@@ -1,23 +1,28 @@
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 class SearchFunctions:
-    async def saved(self, update, context):
+    async def saved(self, update, context, page=0):
         if not self.authorized(update): return
-        rows = self.store.db.execute("SELECT * FROM jobs WHERE state IN ('oversize','reported','link_only') ORDER BY id DESC LIMIT 20").fetchall()
-        sources=self.store.db.execute('SELECT id,payload FROM source_links ORDER BY id DESC LIMIT 20').fetchall()
-        if not rows and not sources:
-            await update.message.reply_text('No saved links.'); return
-        for row in rows:
-            keyboard = InlineKeyboardMarkup([[InlineKeyboardButton('Report dead link', callback_data=f'report:{row["id"]}')]])
-            await update.message.reply_text(f'#{row["id"]} {row["filename"]} · {row["size"]/1_000_000:.1f} MB\n{row["source"]}', reply_markup=keyboard, disable_web_page_preview=True)
-
         import json
+        from .menu import navigation
+        rows = self.store.db.execute("SELECT * FROM jobs WHERE state IN ('oversize','reported','link_only') ORDER BY id DESC LIMIT 20").fetchall()
+        sources = self.store.db.execute('SELECT id,payload FROM source_links ORDER BY id DESC LIMIT 20').fetchall()
+        choices = []
+        for row in rows:
+            choices.append((f'#{row["id"]} {row["filename"]} · {row["size"]/1_000_000:.1f} MB', f'menu:savedjob:{row["id"]}'))
         for source in sources:
-            item=json.loads(source['payload'])
-            movie=item.get('movie',{})
-            size=item.get('size')
-            label=f"{movie.get('name','File')} | {item.get('quality') or 'quality unknown'} | {str(round(size/1_000_000,1))+' MB' if isinstance(size,(int,float)) else 'size unknown'}"
-            await update.message.reply_text(label,reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('View file / link',callback_data=f'file:{source["id"]}')]]))
+            item = json.loads(source['payload'])
+            size = item.get('size')
+            size_text = f'{size/1_000_000:.1f} MB' if isinstance(size, (int, float)) else 'size unknown'
+            choices.append((f'{item.get("movie", {}).get("name", "File")} | {item.get("quality") or "quality unknown"} | {size_text}', f'file:{source["id"]}'))
+        page = max(0, min(page, max(0, (len(choices)-1)//8)))
+        buttons = [[InlineKeyboardButton(label[:100], callback_data=data)] for label, data in choices[page*8:page*8+8]]
+        paging = []
+        if page: paging.append(InlineKeyboardButton('Previous', callback_data=f'menu:savedpage:{page-1}'))
+        if (page+1)*8 < len(choices): paging.append(InlineKeyboardButton('More', callback_data=f'menu:savedpage:{page+1}'))
+        if paging: buttons.append(paging)
+        buttons.append(navigation())
+        await self.show_panel(update.message, f'Saved links · Page {page+1}' if choices else 'No saved links.', reply_markup=InlineKeyboardMarkup(buttons))
 
     async def find(self, update, context):
         if not self.authorized(update): return
@@ -26,7 +31,7 @@ class SearchFunctions:
 
     async def search_query(self, update, query):
         if not query:
-            await update.message.reply_text('Use /find <title>.'); return
+            await self.show_panel(update.message, 'Use /find <title>.'); return
         rows = self.store.search(query)
         text = '\n'.join(f'#{r["id"]} {r["title"]} · {r["size"]/1_000_000:.1f} MB · message {r["telegram_message_id"]}' for r in rows)
-        await update.message.reply_text(text or 'No published matches found.')
+        await self.show_panel(update.message, text or 'No published matches found.')

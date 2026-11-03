@@ -58,11 +58,41 @@ Use **Start transfers** and **Stop transfers** to allow or block new downloads a
 
 <!-- coderabbit-ai-generated-section:v1:de2ef4aa517506ef486208025498897c72c699345fbdfbeeb4d9425d402ff666 -->
 
-Group management and migration menu entries are placeholders for later features. My channels lists channels and groups owned by the logged-in user where the bot is an administrator. When no destination is set, upload review opens this selection; selecting a destination generates a fresh approval preview. Bot administrator/posting access is checked again before upload.
+<!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:f26e2540ad2c961c498434d95274572fd001fe7026ac2251093998f39d287ea9 -->
+
+Menus reuse one temporary panel per admin. Pending searches, file checks and transfer status appear on the current panel as you navigate; search results load there or appear as a Results button if you have opened another menu. Saved links are paginated, and Upload approvals opens a compact list before showing the selected preview. Back restores the previous screen and its input prompt. After five minutes without interaction (checked every 15 seconds), temporary menu messages are deleted; active work delays cleanup. Movie cards, file confirmations, selected-destination notices and transfer outcomes are preserved. Telegram deletion failures fall back to removing the menu buttons. Cleanup tracks messages created during the current bot process; it does not scan or delete your chat history. Use /start to reopen the menu.
+
+Migration is available from the menu and /migration; copying channel/group messages still awaits the source and destination workflow. Group management remains a placeholder. My channels lists channels and groups owned by the logged-in user where the bot is an administrator.
+
+<!-- /coderabbit-ai-generated:v1 --> When no destination is set, upload review opens this selection; selecting a destination generates a fresh approval preview. Bot administrator/posting access is checked again before upload.
 
 <!-- /coderabbit-ai-generated:v1 -->
 
-Download, upload, search, group management, migration and user session code are in separate modules. The bot session is managed by the Telegram application; the user session is stored locally. <!-- coderabbit-ai-generated:v1 -->
+<!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:7ad39605ef842149745c3b50079680e3468b5c871a091a39f41db02efaaf0e23 -->
+
+Add-ons lists every saved catalogue and provider repository with ON/OFF buttons. Provider repositories also expose individual provider switches. Choices persist across restarts and apply to new lookups; already running requests can finish. After the first explicit toggle, missing default repositories are no longer automatically registered, preserving your selected combination. Disabled sources remain listed and can be enabled again. Use Add manifest to import another source.
+
+Search covers the search-capable catalogue types declared by enabled sources, including series and anime catalogues. Series navigation is title → season → episode → available files. Seasons and episodes sort numerically, specials use season 0, and episode filenames include S01E02. <!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:ba61dbf71a4d391fbb6986ec670ca2dc9d2ce9749cb573a87505ba6e314b304e -->
+
+Stream add-ons receive the catalogue episode ID only when their manifest resource type and ID-prefix rules match. Compatible enabled metadata add-ons can supply details when the originating catalogue cannot. Embedded movie/episode file links are used directly when present, retaining request headers and the normal access probes. Nuvio providers receive the parent title TMDB ID with `movie` or `tv` and season/episode numbers, as described in the [Nuvio provider interface](https://github.com/yoruix/nuvio-providers/blob/main/DOCUMENTATION.md). <!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:867ef1c26c2e4208bdca8e27891d80b36255b495691c1157aaece72adaa00ab0 -->
+
+The bot gets IDs from your enabled catalogues and requires no IMDb or TMDB API key. If the selected metadata lacks a TMDB ID, it checks compatible enabled metadata add-ons for the same title ID. If none supplies a TMDB ID, plugins that require one cannot fetch that title; stream add-ons can still return results using the catalogue ID. The bot does not guess identities from similar titles.
+
+<!-- /coderabbit-ai-generated:v1 -->
+
+<!-- /coderabbit-ai-generated:v1 --> Availability depends on the selected catalogue supplying episode metadata and a source supporting that title. Downloads remain individually confirmed, one transfer at a time; automatic whole-season queues are not implemented.
+
+Download, upload, search, group management, migration and user session code are in separate modules.
+
+<!-- /coderabbit-ai-generated:v1 --> The bot session is managed by the Telegram application; the user session is stored locally. <!-- coderabbit-ai-generated:v1 -->
 
 <!-- coderabbit-ai-generated-section:v1:cf34a90fefbf7919e4ed1107ac01d867678b19c86c155b6e0980465019350997 -->
 

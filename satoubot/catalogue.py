@@ -14,22 +14,73 @@ from .file_info import probe, clean_title
 
 
 class CatalogueFunctions:
-    async def addons(self, update, context):
+    async def addons(self, update, context, page=0, repository=None):
+        if not self.authorized(update): return
+        context.user_data.pop('manifest_pending', None)
+        service = Discovery(self.store)
+        entries = []
+        for url, kind, manifest in service.manifests(active=False):
+            if repository and url != repository: continue
+            if repository:
+                for scraper in manifest.get('scrapers', []):
+                    filename = scraper.get('filename')
+                    if not filename: continue
+                    active = service.enabled(url) and scraper.get('enabled', True) and service.enabled(url, filename)
+                    entries.append((scraper.get('name', filename), active, url, filename))
+            else:
+                entries.append((manifest.get('name', 'Add-on'), service.enabled(url), url, None))
+        page = max(0, min(page, max(0, (len(entries)-1)//8)))
+        rows = []
+        for name, active, url, provider in entries[page*8:page*8+8]:
+            key = self.store.cache('addon_control', {'url':url, 'provider':provider, 'repository':repository, 'page':page})
+            rows.append([Button(('ON · ' if active else 'OFF · ') + str(name)[:70], callback_data=f'addontoggle:{key}')])
+            if not repository and any(u == url and k == 'providers' for u, k, _ in service.manifests(active=False)):
+                rows.append([Button('Choose individual providers', callback_data=f'addonproviders:{key}:0')])
+        key = self.store.cache('addon_control', {'repository':repository})
+        paging = []
+        if page: paging.append(Button('Previous', callback_data=f'addonpage:{key}:{page-1}'))
+        if (page+1)*8 < len(entries): paging.append(Button('More', callback_data=f'addonpage:{key}:{page+1}'))
+        if paging: rows.append(paging)
+        rows.append([Button('Add manifest', callback_data='menu:addmanifest')])
+        rows.append(navigation())
+        title = 'Providers' if repository else 'Add-ons'
+        text = f'{title} · Page {page+1}\nTap to turn ON/OFF. Changes apply to new lookups.'
+        if repository and not service.enabled(repository): text += '\nThe repository is OFF; enable it in Add-ons to use these providers.'
+        if not entries: text += '\nNo sources saved. Add a manifest to get started.'
+        await self.show_panel(update.message, text, reply_markup=Markup(rows))
+
+    async def addon_callback(self, update, context):
+        from types import SimpleNamespace
+        parts = update.callback_query.data.split(':')
+        try: control = self.store.cached(int(parts[1]), 'addon_control')
+        except (ValueError, IndexError): return
+        if not control: return await self.show_panel(update.callback_query.message, 'This add-on list expired. Open Add-ons again.')
+        repository, page = control.get('repository'), control.get('page', 0)
+        if parts[0] == 'addontoggle':
+            Discovery(self.store).toggle(control['url'], control.get('provider'))
+        else:
+            try: page = int(parts[2])
+            except (ValueError, IndexError): return
+            if parts[0] == 'addonproviders': repository = control['url']
+        proxy = SimpleNamespace(message=update.callback_query.message, effective_user=update.effective_user, effective_chat=update.effective_chat)
+        await self.addons(proxy, context, page, repository)
+
+    async def add_manifest_prompt(self, update, context):
         if not self.authorized(update): return
         context.user_data.pop('uploaded_manifest', None)
         context.user_data['manifest_pending'] = True
         names = [m.get('name', 'Add-on') for _, _, m in Discovery(self.store).manifests()]
-        await update.message.reply_text('Send the catalogue/add-on manifest URL (Stremio format), or a Nuvio provider manifest URL.\nSaved: ' + (', '.join(names) or 'none') + '\nUse /search <movie name> after adding a catalogue.',
+        await self.show_panel(update.message, 'Send the catalogue/add-on manifest URL (Stremio format), or a Nuvio provider manifest URL.\nSaved: ' + (', '.join(names) or 'none') + '\nUse /search <movie name> after adding a catalogue.',
             reply_markup=Markup([[Button('Add Yoru providers', callback_data='defaultproviders')], navigation()]))
 
     async def manifest_document(self, update, context):
         if not self.authorized(update): return
         document = update.message.document
         if not context.user_data.get('manifest_pending'):
-            await update.message.reply_text('Open Add-ons first to import a manifest file.')
+            await self.show_panel(update.message, 'Open Add-ons first to import a manifest file.')
             return
         if not document.file_size or document.file_size > 1_000_000:
-            await update.message.reply_text('Send a JSON manifest under 1 MB, or paste its URL.')
+            await self.show_panel(update.message, 'Send a JSON manifest under 1 MB, or paste its URL.')
             return
         try:
             remote = await document.get_file()
@@ -38,9 +89,9 @@ class CatalogueFunctions:
             manifest = json.loads(data)
             if not isinstance(manifest, dict): raise ValueError()
             context.user_data['uploaded_manifest'] = manifest
-            await update.message.reply_text('Now send the original manifest URL or repository base URL. The bot needs it to resolve catalogue endpoints and plugin filenames.')
+            await self.show_panel(update.message, 'Now send the original manifest URL or repository base URL. The bot needs it to resolve catalogue endpoints and plugin filenames.')
         except Exception:
-            await update.message.reply_text('Could not read this JSON manifest. Paste the original manifest URL instead.')
+            await self.show_panel(update.message, 'Could not read this JSON manifest. Paste the original manifest URL instead.')
 
     def launch_discovery(self, coro):
         if not hasattr(self, 'discovery_tasks'): self.discovery_tasks = set()
@@ -55,19 +106,19 @@ class CatalogueFunctions:
         query = ' '.join(context.args).strip()
         if not query:
             context.user_data['catalogue_search_pending'] = True
-            await update.message.reply_text('Send a movie name. Searching does not start a download. For inline search, type @your_bot_username followed by the title in Telegram.')
+            await self.show_panel(update.message, 'Send a movie name. Searching does not start a download. For inline search, type @your_bot_username followed by the title in Telegram.')
             return
         await self.begin_search(update.message, query)
 
     async def begin_search(self, message, query):
-        if getattr(self, 'discovery_tasks', None):
-            await message.reply_text('A search is processing. Please wait until it finishes.')
+        if 'search' in self.panel().pending:
+            await self.show_panel(message, 'Your search is still running. Results will appear here.', reply_markup=Markup([navigation()]))
             return
         if not any(k == 'addon' for _, k, _ in Discovery(self.store).manifests()):
             await message.reply_text('Please add your catalogue manifest URL using Add-ons first.')
             return
-        await message.reply_text(f'Searching for {query[:120]}…')
-        self.launch_discovery(self.search_results(message, query))
+        await self.show_panel(message, f'Searching for {query[:120]}…', reply_markup=Markup([navigation()]))
+        await self.start_panel_task('search', f'Search: {query[:120]}', lambda: self.search_results(message, query), None)
 
     async def search_results(self, message, query):
         try:
@@ -76,13 +127,28 @@ class CatalogueFunctions:
             for movie in movies:
                 key = self.store.cache('movie', movie)
                 label = f'{movie["name"]} ({movie.get("year") or movie.get("releaseInfo") or "year unknown"})'
+                if movie.get('type', 'movie') != 'movie': label += ' · Series / episodes'
                 buttons.append([Button(label[:100], callback_data=f'movie:{key}')])
-            buttons.append(navigation())
+            result_buttons = [(row[0].text, row[0].callback_data) for row in buttons]
             text = 'Choose a movie to see its image, details and available files. No download starts until you select one.' if movies else 'No matching movies found.'
             if errors: text += '\nSome catalogues failed. Try again later.'
-            await message.reply_text(text, reply_markup=Markup(buttons) if buttons else None)
+            key = self.store.cache('search_panel', {'text': text, 'buttons': result_buttons})
+            panel = self.panel()
+            async with panel.lock:
+                if panel.text == f'Searching for {query[:120]}…':
+                    panel.text = text
+                    panel.markup = Markup(buttons + [navigation()])
+                else:
+                    panel.results[key] = f'Results: {query[:70]}'
+                while len(panel.results) > 2: panel.results.pop(next(iter(panel.results)))
+                if panel.message is not None: await self._render_panel(panel, message=message)
         except Exception:
-            await message.reply_text('Search failed. Please try again later.')
+            key = self.store.cache('search_panel', {'text': 'Search failed. Please try again later.', 'buttons': []})
+            panel = self.panel()
+            async with panel.lock:
+                panel.results[key] = f'Search failed: {query[:65]}'
+                if panel.message is not None:
+                    await self._render_panel(panel, message=message)
 
     async def movie_card(self, context, key):
         movie = self.store.cached(key, 'movie')
@@ -115,8 +181,9 @@ class CatalogueFunctions:
             self.store.db.commit()
             if not cursor.rowcount: return
             qualities = ', '.join(dict.fromkeys(str(s.get('quality') or 'unspecified')[:35] for s in checked))[:250]
-            caption = f'{movie["name"][:150]}\nYear: {movie.get("year") or movie.get("releaseInfo") or "unknown"}\nQualities: {qualities or "none found"}\nAvailable files: {len(source_ids)}'
-            caption += '\nSelect a file to download. Larger or unsupported files can be saved as links.'
+            episode_label = f' · S{movie["season"]:02d}E{movie["episode"]:02d}' if movie.get('season') is not None else ''
+            caption = f'{movie["name"][:150]}{episode_label}\nYear: {movie.get("year") or movie.get("releaseInfo") or "unknown"}\nQualities: {qualities or "none found"}\nAvailable files: {len(source_ids)}'
+            caption += '\nDW: checked for download. Manual and Retry links follow. Select a file to review it.'
             if not final: caption += '\nSearching other providers…'
             if errors: caption += f'\n{len(errors)} source(s) failed or need configuration; search again to retry.'
             for error in dict.fromkeys(e for e in errors if e.startswith('Plugin runtime:')):
@@ -177,7 +244,7 @@ class CatalogueFunctions:
                 # Keep unverified and failed links out of the persistent ready list.
                 stream['movie'] = movie
                 if stream.get('size_verified') and stream.get('size') and Path(stream.get('filename') or '').suffix.lower() in ('.mp4','.mkv','.avi','.mov','.webm'):
-                    stream['identity'] = movie['id'] + ':' + stream['filename'].casefold() + ':' + str(stream['size'])
+                    stream['identity'] = (movie.get('video_id') or movie['id']) + ':' + stream['filename'].casefold() + ':' + str(stream['size'])
                 kind = 'stream' if stream.get('check_status') in ('ready','manual') else 'unchecked'
                 source_key = self.store.cache(kind, stream)
                 if kind == 'unchecked': source_key = -source_key
@@ -223,14 +290,14 @@ class CatalogueFunctions:
         if q.data == 'defaultproviders':
             try:
                 name, _ = await Discovery(self.store).add(DEFAULT_PROVIDERS)
-                await q.message.reply_text(f'Saved {name}. Add your catalogue manifest next if you have not added one.')
+                await self.show_panel(q.message, f'Saved {name}. Add your catalogue manifest next if you have not added one.')
                 context.user_data.pop('manifest_pending', None)
             except Exception:
-                await q.message.reply_text('Could not load the provider manifest. Try again later.')
+                await self.show_panel(q.message, 'Could not load the provider manifest. Try again later.', reply_markup=Markup([navigation()]))
             return
         if q.data == 'searchagain':
             context.user_data['catalogue_search_pending'] = True
-            await q.message.reply_text('Send another movie name.')
+            await self.show_panel(q.message, 'Send another movie name.')
             return
         try:
             action, raw = q.data.split(':', 1); key = int(raw)
@@ -260,27 +327,29 @@ class CatalogueFunctions:
             await q.edit_message_reply_markup(reply_markup=None)
             if action == 'no': await q.message.reply_text('Download cancelled.')
         elif action == 'movie':
-            if getattr(self, 'discovery_tasks', None):
-                await q.message.reply_text('A search is processing. Please wait until it finishes.')
-                return
-            await q.message.reply_text('Finding available files and checking sizes…')
-            self.launch_discovery(self.safe_movie_card(context, key))
+            await self.start_panel_task('movie', 'Finding available files and checking sizes…', lambda: self.safe_movie_card(context, key), context)
         elif action in ('file','retryfile'):
             stream = self.store.cached(key, 'unchecked' if action == 'retryfile' else 'stream')
             if not stream:
                 await q.message.reply_text('File result expired. Use /search again.'); return
             if not (isinstance(stream.get('size'),(int,float)) and stream['size']>MAX_BYTES):
                 if not await self.transfer_gate(q.message): return
-            if getattr(self, 'discovery_tasks', None):
-                await q.message.reply_text('Processing. Please wait.'); return
-            self.launch_discovery(self.prepare_choice(context, stream))
+            await self.start_panel_task('file', f'Checking {stream.get("filename") or stream["movie"]["name"]}…', lambda: self.prepare_choice(context, stream), context)
 
     def file_page(self, selection, ids, page):
-        page=max(0,min(page,max(0,(len(ids)-1)//4)))
-        rows=[]
-        for key in ids[page*4:page*4+4]:
+        choices = []
+        for key in ids:
             stream=self.store.cached(-key,'unchecked') if key < 0 else self.store.cached(key,'stream')
-            if not stream: continue
+            if stream:
+                size = stream.get('size')
+                direct = (key > 0 and stream.get('check_status') == 'ready'
+                          and isinstance(size, (int, float)) and 0 < size <= MAX_BYTES)
+                choices.append((not direct, key, stream))
+        # Stable sort retains provider arrival order within each group.
+        choices.sort(key=lambda item: item[0])
+        page=max(0,min(page,max(0,(len(choices)-1)//4)))
+        rows=[]
+        for _, key, stream in choices[page*4:page*4+4]:
             size=stream.get('size'); size_text=f'{size/1_000_000:.1f} MB' if isinstance(size,(int,float)) else 'size unknown'
             action=('Unavailable' if stream.get('check_status') == 'unavailable' else 'Retry') if key < 0 else ('Manual' if stream.get('check_status') == 'manual' else ('Link' if isinstance(size,(int,float)) and size>MAX_BYTES else ('DW' if size else 'Size unknown')))
             if action == 'DW' and self.transfer_busy(): action = 'Wait (busy)'
@@ -288,7 +357,7 @@ class CatalogueFunctions:
             rows.append([Button(f'{action} {quality} | {size_text} | {stream.get("file_type","unknown")}'[:120],callback_data=f'{"retryfile" if key < 0 else "file"}:{abs(key)}')])
         navigation=[]
         if page: navigation.append(Button('Previous',callback_data=f'page:{selection*1000+page-1}'))
-        if (page+1)*4<len(ids):navigation.append(Button('More',callback_data=f'page:{selection*1000+page+1}'))
+        if (page+1)*4<len(choices):navigation.append(Button('More',callback_data=f'page:{selection*1000+page+1}'))
         if navigation: rows.append(navigation)
         rows.append([Button('Back', callback_data='searchagain'), Button('Cancel',callback_data=f'cancelpage:{selection}'), Button('Main menu', callback_data='menu:main')])
         return Markup(rows)
@@ -324,7 +393,12 @@ class CatalogueFunctions:
 
     async def safe_movie_card(self, context, key):
         try:
-            await self.movie_card(context, key)
+            movie = self.store.cached(key, 'movie')
+            if movie and movie.get('type', 'movie') != 'movie' and movie.get('season') is None:
+                movie = await Discovery(self.store).details(movie)
+                await self.series_menu(context, movie)
+            else:
+                await self.movie_card(context, key)
         except Exception:
             await context.bot.send_message(self.admin_id, 'Could not fetch file results. Please try /search again.')
 

@@ -224,7 +224,8 @@ async def test_owned_destinations_require_bot_admin_and_selection_needs_fresh_ap
     context=MagicMock();context.bot.id=123;context.bot.send_message=AsyncMock();context.bot.get_chat_member=AsyncMock(return_value=SimpleNamespace(status='administrator',can_post_messages=True))
     await bot.destination_menu(context)
     rows=context.bot.send_message.await_args.kwargs['reply_markup'].inline_keyboard
-    assert len(rows)==3 and rows[0][0].text=='Owned'
+    assert len(rows)==2 and rows[0][0].text=='Owned'
+    assert [button.text for button in rows[-1]] == ['Back', 'Cancel', 'Main menu']
     q=MagicMock();q.data=rows[0][0].callback_data;q.edit_message_reply_markup=AsyncMock();q.message.reply_text=AsyncMock()
     update=MagicMock();update.callback_query=q
     await bot.select_destination(update,context)
@@ -292,3 +293,24 @@ async def test_runtime_error_is_reported_in_movie_card(tmp_path, monkeypatch):
     context=MagicMock(); context.bot.send_message=AsyncMock()
     await bot.movie_card(context,key)
     assert 'Node.js 24 or newer is required' in context.bot.send_message.await_args.args[1]
+
+
+def test_downloadable_results_first_across_pages_without_losing_manual_or_failures(tmp_path):
+    store=Store(tmp_path/'db');bot=Bot(store,tmp_path,42,MagicMock())
+    def cache(n,status,size,kind='stream'):
+        return store.cache(kind, {'url':f'https://file.test/{n}', 'quality':str(n), 'size':size, 'check_status':status})
+    manual=cache('manual','manual',100)
+    dead=-cache('dead','unavailable',None,'unchecked')
+    large=cache('large','ready',3_000_000_000)
+    ready1=cache('first','ready',100)
+    unknown=cache('unknown','ready',None)
+    ready2=cache('second','ready',200)
+    ids=[manual,dead,large,ready1,unknown,ready2]
+    page=store.cache('pages',ids)
+    first=bot.file_page(page,ids,0).inline_keyboard
+    assert [row[0].callback_data for row in first[:4]] == [f'file:{ready1}',f'file:{ready2}',f'file:{manual}',f'retryfile:{-dead}']
+    assert first[0][0].text.startswith('DW ')
+    assert first[2][0].text.startswith('Manual ') and first[3][0].text.startswith('Unavailable ')
+    second=bot.file_page(page,ids,1).inline_keyboard
+    assert [row[0].callback_data for row in second[:2]] == [f'file:{large}',f'file:{unknown}']
+    assert second[0][0].text.startswith('Link ') and second[1][0].text.startswith('Size unknown ')
