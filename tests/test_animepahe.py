@@ -128,3 +128,39 @@ def test_changed_api_endpoint_preserves_disabled_state_without_duplicates(tmp_pa
     sources=[(url,kind) for url,kind,_ in Discovery(store).manifests(active=False)]
     assert sources==[(second,'animepahe')]
     assert not Discovery(store).enabled(second)
+
+
+@pytest.mark.asyncio
+async def test_bot_search_with_only_builtin_animepahe(tmp_path, api):
+    base, calls = api
+    bot = Bot(Store(tmp_path/'db'), tmp_path, 42, MagicMock())
+    animepahe.register_default(bot.store, base)
+    message = MagicMock(reply_text=AsyncMock(return_value=MagicMock(edit_text=AsyncMock())))
+    await bot.begin_search(message, 'One Piece')
+    await asyncio.gather(*bot.discovery_tasks)
+    assert ('/api/search', {'q':['One Piece']}) in calls
+    assert bot.panel().markup.inline_keyboard[0][0].text.startswith('One Piece')
+
+
+@pytest.mark.asyncio
+async def test_bot_search_with_disabled_builtin_requires_source(tmp_path, api):
+    base, calls = api
+    bot = Bot(Store(tmp_path/'db'), tmp_path, 42, MagicMock())
+    animepahe.register_default(bot.store, base)
+    Discovery(bot.store).toggle(base)
+    message = MagicMock(reply_text=AsyncMock())
+    await bot.begin_search(message, 'One Piece')
+    assert 'Enable AnimePahe' in message.reply_text.await_args.args[0]
+    assert not calls and not bot.panel().pending
+
+
+@pytest.mark.asyncio
+async def test_bot_reports_builtin_failure_without_requesting_manifest(tmp_path, monkeypatch):
+    bot = Bot(Store(tmp_path/'db'), tmp_path, 42, MagicMock())
+    animepahe.register_default(bot.store)
+    monkeypatch.setattr(animepahe, 'search', AsyncMock(side_effect=ValueError('API unavailable')))
+    message = MagicMock(reply_text=AsyncMock(return_value=MagicMock(edit_text=AsyncMock())))
+    await bot.begin_search(message, 'One Piece')
+    await asyncio.gather(*bot.discovery_tasks)
+    assert 'AnimePahe API failed or timed out' in bot.panel().text
+    assert 'No manifest is needed for AnimePahe' in bot.panel().text

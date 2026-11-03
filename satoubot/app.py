@@ -15,6 +15,7 @@ from telegram import (InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton
                       KeyboardButtonRequestChat, ReplyKeyboardMarkup, ReplyKeyboardRemove, Update)
 from telegram.ext import (Application, CallbackQueryHandler, CommandHandler,
                           MessageHandler, InlineQueryHandler, filters)
+from telegram.error import TelegramError
 
 from .store import Store
 from .transfer import safe_name
@@ -38,6 +39,7 @@ import time
 
 log = logging.getLogger('satoubot')
 current_admin = contextvars.ContextVar('current_admin', default=None)
+cancelled_command_work = contextvars.ContextVar('cancelled_command_work', default=False)
 
 def admin_session(handler):
     @wraps(handler)
@@ -49,6 +51,38 @@ def admin_session(handler):
             if owner and owner.authorized(update): owner.touch_panel(context)
             return await handler(update, context)
         finally: current_admin.reset(token)
+    return wrapped
+
+
+def latest_command(handler, *, clear_prompt=True):
+    """Allow a newer command from the same admin to replace temporary work."""
+    session_handler = admin_session(handler)
+    @wraps(handler)
+    async def wrapped(update, context):
+        owner = handler.__self__
+        if not owner.authorized(update): return
+        user_id = update.effective_user.id
+        if not hasattr(owner, 'command_tasks'): owner.command_tasks = {}
+        current = asyncio.current_task()
+        previous = owner.command_tasks.get(user_id)
+        owner.command_tasks[user_id] = current
+        stopped = False
+        try:
+            if previous and previous is not current and not previous.done():
+                stopped = True
+                previous.cancel()
+                await asyncio.gather(previous, return_exceptions=True)
+            token = current_admin.set(user_id)
+            try:
+                stopped = bool(await owner.cancel_panel_tasks()) or stopped
+                if clear_prompt: owner.clear_prompt(context)
+            finally: current_admin.reset(token)
+            stopped_token = cancelled_command_work.set(stopped)
+            try: return await session_handler(update, context)
+            finally: cancelled_command_work.reset(stopped_token)
+        finally:
+            if owner.command_tasks.get(user_id) is current:
+                owner.command_tasks.pop(user_id, None)
     return wrapped
 
 
@@ -103,8 +137,11 @@ class Bot(SourceHistoryFunctions, DailyFunctions, SeriesFunctions, InterfaceFunc
             await self.start_panel_task('movie', 'Finding available files and checking sizes…', lambda: self.safe_movie_card(context, key), context)
             return
         notice = await update.message.reply_text('Opening menu…', reply_markup=ReplyKeyboardRemove())
-        self.panel().retired.append(notice)
-        await self.main_menu(update.message)
+        try:
+            await self.main_menu(update.message)
+        finally:
+            try: await notice.delete()
+            except TelegramError: self.panel().retired.append(notice)
 
     async def status(self, update, context):
         if not self.authorized(update): return
@@ -114,6 +151,12 @@ class Bot(SourceHistoryFunctions, DailyFunctions, SeriesFunctions, InterfaceFunc
         target = self.store.setting('target', 'not selected')
         state = 'on' if self.transfers_enabled() else 'off'
         await update.message.reply_text(f'Transfers: {state}\nDestination: {target}\nSystem CPU: {cpu:.1f}%\nBot memory: {memory:.1f} MiB\nActive transfers: {sum(not task.done() for task in self.tasks)}')
+
+    async def stop(self, update, context):
+        if not self.authorized(update): return
+        text = 'Stopped your pending command or lookup.' if cancelled_command_work.get() else 'No command or lookup is running.'
+        if self.transfer_busy(): text += '\nDownloads and uploads continue.'
+        await self.show_panel(update.message, text, reply_markup=InlineKeyboardMarkup([navigation()]))
 
     async def chat_shared(self, update, context):
         if not self.authorized(update): return
@@ -425,21 +468,22 @@ def main():
     endpoint = os.getenv('BOT_API_URL', 'http://127.0.0.1:8081').rstrip('/')
     application = (Application.builder().token(token).base_url(endpoint+'/bot').base_file_url(endpoint+'/file/bot')
                    .post_init(post_init).post_shutdown(post_shutdown).build())
-    application.add_handler(CommandHandler('start', admin_session(bot.start)))
-    application.add_handler(CommandHandler('status', admin_session(bot.status)))
-    application.add_handler(CommandHandler('rename', admin_session(bot.rename)))
-    application.add_handler(CommandHandler('find', admin_session(bot.find)))
-    application.add_handler(CommandHandler('search', admin_session(bot.online_search)))
-    application.add_handler(CommandHandler('addons', admin_session(bot.addons)))
+    application.add_handler(CommandHandler('start', latest_command(bot.start), block=False))
+    application.add_handler(CommandHandler('stop', latest_command(bot.stop), block=False))
+    application.add_handler(CommandHandler('status', latest_command(bot.status), block=False))
+    application.add_handler(CommandHandler('rename', latest_command(bot.rename), block=False))
+    application.add_handler(CommandHandler('find', latest_command(bot.find), block=False))
+    application.add_handler(CommandHandler('search', latest_command(bot.online_search), block=False))
+    application.add_handler(CommandHandler('addons', latest_command(bot.addons), block=False))
     application.add_handler(InlineQueryHandler(admin_session(bot.inline_search)))
-    application.add_handler(CommandHandler('saved', admin_session(bot.saved)))
-    application.add_handler(CommandHandler('pending', admin_session(bot.pending)))
-    application.add_handler(CommandHandler('migration', admin_session(bot.migration_menu)))
+    application.add_handler(CommandHandler('saved', latest_command(bot.saved), block=False))
+    application.add_handler(CommandHandler('pending', latest_command(bot.pending), block=False))
+    application.add_handler(CommandHandler('migration', latest_command(bot.migration_menu), block=False))
     application.add_handler(CallbackQueryHandler(admin_session(bot.callback)))
     application.add_handler(MessageHandler(filters.StatusUpdate.CHAT_SHARED, admin_session(bot.chat_shared)))
     application.add_handler(MessageHandler(filters.PHOTO, admin_session(bot.thumbnail_photo)))
     application.add_handler(MessageHandler(filters.Document.ALL, admin_session(bot.manifest_document)))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, admin_session(bot.text)))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, latest_command(bot.text, clear_prompt=False), block=False))
     try:
         asyncio.get_event_loop()
     except RuntimeError:

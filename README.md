@@ -88,7 +88,25 @@ Use **Start transfers** and **Stop transfers** to allow or block new downloads a
 
 <!-- coderabbit-ai-generated-section:v1:f26e2540ad2c961c498434d95274572fd001fe7026ac2251093998f39d287ea9 -->
 
-Menus reuse one temporary panel per admin. Pending searches, file checks and transfer status appear on the current panel as you navigate; search results load there or appear as a Results button if you have opened another menu. Saved links are paginated, and Upload approvals opens a compact list before showing the selected preview. Back restores the previous screen and its input prompt. After five minutes without interaction (checked every 15 seconds), temporary menu messages are deleted; active work delays cleanup. Movie cards, file confirmations, selected-destination notices and transfer outcomes are preserved. Telegram deletion failures fall back to removing the menu buttons. Cleanup tracks messages created during the current bot process; it does not scan or delete your chat history. Use /start to reopen the menu.
+<!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:e26f8c6d35d64d3192c8c0f018e56715f10cbe75a2d43060f45230f481e64484 -->
+
+<!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:d3959e2ac821b81badff5e1cf986cb842cc0698f23ed2fe46a7b167475bbaff4 -->
+
+<!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:3ce28051ec55b804fb98cca91dbb9e63509c6827429e9172d68245dabe198c06 -->
+
+Menus reuse one temporary panel per admin. A new command or text message cancels that admin’s earlier temporary searches and file checks. Use `/stop` to cancel your current command or lookups; downloads and uploads continue. While navigating menus without issuing a new command, pending checks and transfer status appear on the current panel, and search results load there or appear as a Results button.
+
+<!-- /coderabbit-ai-generated:v1 -->
+
+<!-- /coderabbit-ai-generated:v1 -->
+
+<!-- /coderabbit-ai-generated:v1 --> Saved links are paginated, and Upload approvals opens a compact list before showing the selected preview. Back restores the previous screen and its input prompt. After five minutes without interaction (checked every 15 seconds), temporary menu messages are deleted; active work delays cleanup. Movie cards, file confirmations, selected-destination notices and transfer outcomes are preserved. Telegram deletion failures fall back to removing the menu buttons. Cleanup tracks messages created during the current bot process; it does not scan or delete your chat history. Use /start to reopen the menu.
 
 Migration is available from the menu and /migration; copying channel/group messages still awaits the source and destination workflow. Group management remains a placeholder. My channels lists channels and groups owned by the logged-in user where the bot is an administrator.
 
@@ -118,7 +136,23 @@ The bot gets IDs from your enabled catalogues and requires no IMDb or TMDB API k
 
 ### AnimePahe add-on
 
-AnimePahe appears enabled in **Add-ons** by default, with a switch to disable it. SatouBot connects to a separately running [AnimePahe API](https://github.com/ElijahCodes12345/animepahe-api/blob/main/readme.md), defaulting to `http://127.0.0.1:3000/`. Set `ANIMEPAHE_API_URL` in `.env` if your API uses a different address, and restart SatouBot. The upstream author requires users to host their own API; SatouBot does not install or start it. If it is unavailable, other catalogues can still return results and the search reports an AnimePahe source failure.
+AnimePahe appears enabled in **Add-ons** by default, with a switch to disable it. SatouBot connects to a separately running [AnimePahe API](https://github.com/ElijahCodes12345/animepahe-api/blob/main/readme.md), defaulting to `http://127.0.0.1:3000/`. Set `ANIMEPAHE_API_URL` in `.env` if your API uses a different address, and restart SatouBot. The upstream author requires users to host their own API; SatouBot does not install or start it. <!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:b33bfb0bcafa74d697dd396209f8eb334727fe2905b80d1aec28f08ff8e42b6c -->
+
+If it is unavailable, other catalogues can still return results and the search reports an AnimePahe source failure. No Stremio manifest is required for AnimePahe; enable its switch in **Add-ons**, then use `/search One Piece`.
+
+If the API returns HTTP 503 with `Failed to refresh cookies`, the bot has reached the API, but the API could not establish a session with the upstream site. Check this independently of Telegram:
+
+```bash
+curl -sS --max-time 60 --get --data-urlencode 'q=One Piece' \
+  -w '\nHTTP %{http_code}\n' http://127.0.0.1:3000/api/search
+docker logs --tail 50 satoubot-animepahe
+```
+
+A running container does not guarantee successful searches. Upstream's cookie refresh waits for `networkidle` and requires a nonempty cookie jar; a navigation timeout or a blocked page can prevent refresh. Confirm the configured upstream `BASE_URL` is reachable from the API environment and serves the expected site. `BASE_URL` belongs to the API container; `ANIMEPAHE_API_URL` belongs to SatouBot and points to that container's HTTP endpoint. Recreate the container after changing its environment. Do not substitute an unverified mirror or disable TLS verification. If reporting the failure, include the Dockerfile and run command or Compose configuration with secrets removed, plus the API image version. Upstream source changes require rebuilding the image; restarting the same image does not apply a patch.
+
+<!-- /coderabbit-ai-generated:v1 -->
 
 Run the API in a separate isolated environment without mounting bot credentials or media. Its upstream scraper evaluates web page scripts and launches Chromium without its sandbox. Search results use AnimePahe's own title and episode IDs; the bot does not guess a match to a different catalogue. Episodes are listed in numeric order per AnimePahe title, up to 100 release pages. AnimePahe does not supply a consistent season number through this API, so the menu labels these entries as Episodes. Files still go through the normal link checks and approval flow. Source availability and any access restrictions depend on AnimePahe and its host. Live AnimePahe and Telegram transfers have not been verified.
 

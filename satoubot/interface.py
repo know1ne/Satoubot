@@ -14,6 +14,7 @@ class Panel:
     markup: object = None
     updated: float = field(default_factory=time.monotonic)
     pending: dict = field(default_factory=dict)
+    tasks: dict = field(default_factory=dict)
     results: dict = field(default_factory=dict)
     retired: list = field(default_factory=list)
     history: list = field(default_factory=list)
@@ -113,6 +114,7 @@ class InterfaceFunctions:
                 await factory()
         finally:
             async with panel.lock:
+                panel.tasks.pop(key, None)
                 panel.pending.pop(key, None)
                 if panel.message is not None:
                     try:
@@ -132,10 +134,22 @@ class InterfaceFunctions:
         try:
             async with panel.lock:
                 await self._render_panel(panel, context=context)
-        except Exception:
+        except BaseException:
             panel.pending.pop(key, None)
             raise
-        self.launch_discovery(self.panel_task(key, factory, context))
+        panel.tasks[key] = self.launch_discovery(self.panel_task(key, factory, context))
+
+    async def cancel_panel_tasks(self):
+        """Cancel this admin's temporary lookups, leaving transfer tasks untouched."""
+        panel = self.panel()
+        tasks = [task for task in panel.tasks.values() if not task.done()]
+        for task in tasks: task.cancel()
+        if tasks: await asyncio.gather(*tasks, return_exceptions=True)
+        for key, task in list(panel.tasks.items()):
+            if task.done():
+                panel.tasks.pop(key, None)
+                panel.pending.pop(key, None)
+        return len(tasks)
 
     async def cleanup_panels(self, now=None):
         now = time.monotonic() if now is None else now

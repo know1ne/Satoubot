@@ -102,6 +102,7 @@ class CatalogueFunctions:
         task = asyncio.create_task(coro)
         self.discovery_tasks.add(task)
         task.add_done_callback(self.discovery_tasks.discard)
+        return task
 
     async def online_search(self, update, context):
         if not self.authorized(update): return
@@ -115,11 +116,9 @@ class CatalogueFunctions:
         await self.begin_search(update.message, query)
 
     async def begin_search(self, message, query):
-        if 'search' in self.panel().pending:
-            await self.show_panel(message, 'Your search is still running. Results will appear here.', reply_markup=Markup([navigation()]))
-            return
-        if not any(k == 'addon' for _, k, _ in Discovery(self.store).manifests()):
-            await message.reply_text('Please add your catalogue manifest URL using Add-ons first.')
+        await self.cancel_panel_tasks()
+        if not any(k in ('addon', 'animepahe') for _, k, _ in Discovery(self.store).manifests()):
+            await message.reply_text('Enable AnimePahe or add a catalogue manifest using Add-ons first.')
             return
         await self.show_panel(message, f'Searching for {query[:120]}…', reply_markup=Markup([navigation()]))
         await self.start_panel_task('search', f'Search: {query[:120]}', lambda: self.search_results(message, query), None)
@@ -135,7 +134,11 @@ class CatalogueFunctions:
                 buttons.append([Button(label[:100], callback_data=f'movie:{key}')])
             result_buttons = [(row[0].text, row[0].callback_data) for row in buttons]
             text = 'Choose a movie to see its image, details and available files. No download starts until you select one.' if movies else 'No matching movies found.'
-            if errors: text += '\nSome catalogues failed. Try again later.'
+            if errors:
+                text += '\nSome catalogues failed. Try again later.'
+                from .animepahe import NAME
+                if NAME in errors:
+                    text += '\nAnimePahe API failed or timed out. Check its container logs and ANIMEPAHE_API_URL. No manifest is needed for AnimePahe.'
             key = self.store.cache('search_panel', {'text': text, 'buttons': result_buttons})
             panel = self.panel()
             async with panel.lock:
