@@ -28,6 +28,9 @@ class InterfaceFunctions:
         return self.panels.setdefault(self.admin_id, Panel())
 
     def touch_panel(self, context):
+        self.last_user_activity = time.monotonic()
+        task = getattr(self, 'idle_check_task', None)
+        if task and not task.done(): task.cancel()
         panel = self.panel()
         if time.monotonic() - panel.updated >= 300 and not panel.pending:
             self.clear_prompt(context)

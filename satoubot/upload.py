@@ -1,11 +1,13 @@
 import asyncio
 import logging
 import time
+from pathlib import Path
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telethon import utils
 from .parallel_upload import upload_parts
 from .progress import format_progress
+from .transfer import MAX_BYTES
 
 log = logging.getLogger('satoubot')
 
@@ -13,6 +15,12 @@ log = logging.getLogger('satoubot')
 class UploadFunctions:
     async def perform_upload(self, context, job_id):
         job = self.store.get(job_id)
+        try: actual_size = Path(job['path']).stat().st_size
+        except (OSError, TypeError): actual_size = job['size']
+        if max(job['size'], actual_size) > MAX_BYTES:
+            self.store.update(job_id, state='local_only', size=max(job['size'], actual_size))
+            await context.bot.send_message(self.admin_id, 'This file exceeds the 2 GB Telegram upload limit and remains on your PC.')
+            return
         try:
             await self.panel_status(context, 'transfer', f'Uploading #{job_id} · {job["filename"]}')
             message = await context.bot.send_message(self.admin_id, f'Connecting upload #{job_id}\n{job["filename"]}')

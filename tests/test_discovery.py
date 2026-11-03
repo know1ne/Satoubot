@@ -198,9 +198,9 @@ async def test_yes_no_confirmation_and_duplicate_yes_never_double_download(tmp_p
 async def test_large_source_returns_link_even_when_off_without_probe_or_download(tmp_path,monkeypatch):
     store=Store(tmp_path/'db');store.set_setting('transfers_enabled','0')
     bot=Bot(store,tmp_path,42,MagicMock())
-    probe_mock=AsyncMock(return_value={'status':'ready','size':3_000_000_000,'filename':'large.mkv','content_type':'video/x-matroska'});monkeypatch.setattr('satoubot.catalogue.probe',probe_mock)
+    probe_mock=AsyncMock(return_value={'status':'ready','size':10_000_000_001,'filename':'large.mkv','content_type':'video/x-matroska'});monkeypatch.setattr('satoubot.catalogue.probe',probe_mock)
     context=MagicMock();context.bot.send_message=AsyncMock()
-    await bot.prepare_choice(context,{'url':'https://file.test/large.mkv','size':3_000_000_000,'movie':{'name':'Example'},'quality':'1080p'})
+    await bot.prepare_choice(context,{'url':'https://file.test/large.mkv','size':10_000_000_001,'movie':{'name':'Example'},'quality':'1080p'})
     assert 'Download it manually' in context.bot.send_message.await_args.args[1]
     assert 'https://file.test/large.mkv' in context.bot.send_message.await_args.args[1]
     probe_mock.assert_awaited_once()
@@ -311,7 +311,7 @@ def test_downloadable_results_first_across_pages_without_losing_manual_or_failur
         return store.cache(kind, {'url':f'https://file.test/{n}', 'quality':str(n), 'size':size, 'check_status':status})
     manual=cache('manual','manual',100)
     dead=-cache('dead','unavailable',None,'unchecked')
-    large=cache('large','ready',3_000_000_000)
+    large=cache('large','ready',10_000_000_001)
     ready1=cache('first','ready',100)
     unknown=cache('unknown','ready',None)
     ready2=cache('second','ready',200)

@@ -19,6 +19,7 @@ class MenuFunctions:
                 [Button('Library search', callback_data='menu:library'), Button('My channels', callback_data='menu:channels')],
                 [Button('Active transfers', callback_data='menu:active'), Button('Admin management', callback_data='menu:admins')],
                 [Button('Daily Uploads', callback_data='menu:daily'), Button('Migration', callback_data='menu:migration')],
+                [Button('Source history', callback_data='menu:sourcehistory')],
                 [Button('Stop transfers' if self.transfers_enabled() else 'Start transfers', callback_data='menu:toggle')]]
         await self.show_panel(message, f'Main menu · Transfers {state}\nSend a movie title to search catalogues.', reply_markup=Markup(rows))
 
@@ -59,6 +60,8 @@ class MenuFunctions:
         if action.startswith('savedjob:'):
             try: job = self.store.get(int(action.split(':')[1]))
             except ValueError: return
+            if job and job['state'] == 'local_only':
+                await q.message.reply_text(f'{job["filename"]} · {job["size"]/1_000_000:.1f} MB\nSaved locally: {job["path"]}'); return
             if job and job['state'] in ('oversize', 'reported', 'link_only'):
                 await q.message.reply_text(f'{job["filename"]} · {job["size"]/1_000_000:.1f} MB\n{job["source"]}', disable_web_page_preview=True)
             return
@@ -78,6 +81,19 @@ class MenuFunctions:
         if action in ('main','cancel'):
             self.clear_prompt(context)
             await self.main_menu(q.message);return
+        if action in ('sourcehistory', 'sourcehistorytoggle'):
+            if update.effective_user.id != self.owner_id:
+                return await self.show_panel(q.message, 'Only the owner can manage source history.')
+            from .source_history import init_history
+            init_history(self.store)
+            if action == 'sourcehistorytoggle':
+                enabled = self.store.setting('idle_source_checks', '1') == '1'
+                self.store.set_setting('idle_source_checks', '0' if enabled else '1')
+            enabled = self.store.setting('idle_source_checks', '1') == '1'
+            history = self.store.db.execute('SELECT host,ready,manual,temporary,unavailable FROM source_history ORDER BY updated DESC LIMIT 15').fetchall()
+            lines = [f'{row["host"]}: {row["ready"]} ready, {row["manual"]} manual, {row["temporary"]} temporary, {row["unavailable"]} unavailable' for row in history]
+            rows = [[Button('Stop idle checks' if enabled else 'Start idle checks', callback_data='menu:sourcehistorytoggle')], navigation()]
+            return await self.show_panel(q.message, 'Source history · idle checks ' + ('on' if enabled else 'off') + '\n' + ('\n'.join(lines) or 'No checks recorded yet.'), reply_markup=Markup(rows))
         if action == 'daily': return await self.daily_menu(q.message, context)
         if action == 'active': return await self.active_menu(q.message)
         if action == 'canceltransfer':

@@ -1,5 +1,8 @@
 def format_progress(stage, filename, done, total, speed):
-    fraction = min(1, max(0, done / total)) if total else 0
+    if not total:
+        return (f'{stage}\n{filename}\n{done:,} bytes ({done/1_000_000:.1f} MB)\n'
+                f'Size: unknown · Speed: {speed/1_000_000:.2f} MB/s · ETA: unknown')
+    fraction = min(1, max(0, done / total))
     filled = int(fraction * 10)
     bar = '█' * filled + '░' * (10 - filled)
     eta = f'{max(0, total-done)/speed/60:.1f} min' if speed else 'waiting for data'

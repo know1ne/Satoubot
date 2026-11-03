@@ -14,7 +14,13 @@ Early foundation for a private Telegram media administrator. This is not yet the
 
 <!-- coderabbit-ai-generated-section:v1:cd08f449df7a869c6b60d71cde3044f59fd70464fd10e392552c1f10ad0ecdac -->
 
-The configured owner and any admins the owner adds can select a channel or group, send a direct HTTP(S) media URL, check it, download a file within the 2000 MB limit, rename it, choose a thumbnail, and approve an upload.
+<!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:e48e272575286e378c328bafee4745d4930f8ea4ce0609ae185c6e012d4aa92d -->
+
+The owner and authorized admins can send an HTTP(S) media URL or choose a search result, approve a download up to 10 GB on local storage, and review files at or below 2 GB for Telegram upload.
+
+<!-- /coderabbit-ai-generated:v1 -->
 
 <!-- /coderabbit-ai-generated:v1 --> On a review preview, choose **Set thumbnail** and send a photo; review the new preview before approving. Telegram may ignore custom thumbnails for some file types or media without recognizable video dimensions. The upload uses the logged-in Telegram user account through MTProto, so the post is sent by that account. The selected account needs access to the destination. File transfers report progress, speed, and estimated time. `/status` shows CPU and memory, `/find` searches locally recorded published items, and `/saved` lists oversized links.
 
@@ -28,9 +34,29 @@ The configured owner and any admins the owner adds can select a channel or group
 
 <!-- coderabbit-ai-generated-section:v1:007bc17cda87143c84e1510467b74f3ab77596cf5107e8832ece0ddbd6f4737d -->
 
+<!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:750b9412dc59dc775f8a57371e759409a669f0bb65f5e7f9018457286e871327 -->
+
 A download uses up to four HTTP byte-range connections when the server advertises range support and provides a stable validator. No aria2 integration or transcoding is used; the verified filename supplies the displayed format, and ffprobe is not required.
 
-<!-- /coderabbit-ai-generated:v1 --> Otherwise it uses a single connection. Before saving and before downloading, the bot checks sources using a small byte range, validates public redirect destinations and reports unavailable, blocked, temporary and manual-only sources. It stops if a source ignores the range. Sources with unverified size cannot be downloaded. Download and upload progress messages show a progress bar, size, speed and ETA. Speed depends on the source and network. <!-- coderabbit-ai-generated:v1 -->
+Supported HLS downloads accept finite, unencrypted MPEG-TS and fragmented MP4 playlists, including master playlists with embedded audio. Choose **Transfer** after reviewing the unknown size and 10 GB local limit, or **Give link** to use the original playlist in VLC or another app. The bot checks each destination and redirect, downloads segments without transcoding, and removes partial files if the download fails or exceeds the limit. Live, encrypted, byte-range and separate audio/subtitle playlists need manual handling. A completed file above 2 GB remains on the PC; smaller files enter the normal upload review. HLS with unknown size is excluded from Daily Uploads.
+
+<!-- /coderabbit-ai-generated:v1 -->
+
+<!-- /coderabbit-ai-generated:v1 --> Otherwise it uses a single connection. Before saving and before downloading, the bot checks sources using a small byte range, validates public redirect destinations and reports unavailable, blocked, temporary and manual-only sources. <!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:675c83f5183d875588f3d81796be3aa30c1a10896f4dcfcf12d1d4bf605fd0e8 -->
+
+For direct files, it stops if a source ignores the range.
+
+<!-- /coderabbit-ai-generated:v1 --> <!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:3e3aa1bbfff2126714db28d4643dcea1d8c4b8c805f73a18af8bb0b78ef53304 -->
+
+Direct files require a verified size. Supported HLS playlists may be approved with an unknown size and stop at the 10 GB local limit.
+
+<!-- /coderabbit-ai-generated:v1 --> Download and upload progress messages show a progress bar, size, speed and ETA. Speed depends on the source and network. <!-- coderabbit-ai-generated:v1 -->
 
 <!-- coderabbit-ai-generated-section:v1:5c6486be6df86ece30017036307bec0b5962e0051a14f003b07fa5197b195b4f -->
 
@@ -84,7 +110,20 @@ Stream add-ons receive the catalogue episode ID only when their manifest resourc
 
 <!-- coderabbit-ai-generated-section:v1:867ef1c26c2e4208bdca8e27891d80b36255b495691c1157aaece72adaa00ab0 -->
 
+<!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:aafccc069dcc8671ad48fc45a087b0ede007512e1dfdbf39ac6cc9978acf2e8e -->
+
 The bot gets IDs from your enabled catalogues and requires no IMDb or TMDB API key. If the selected metadata lacks a TMDB ID, it checks compatible enabled metadata add-ons for the same title ID. If none supplies a TMDB ID, plugins that require one cannot fetch that title; stream add-ons can still return results using the catalogue ID. The bot does not guess identities from similar titles.
+
+### AnimePahe add-on
+
+AnimePahe appears enabled in **Add-ons** by default, with a switch to disable it. SatouBot connects to a separately running [AnimePahe API](https://github.com/ElijahCodes12345/animepahe-api/blob/main/readme.md), defaulting to `http://127.0.0.1:3000/`. Set `ANIMEPAHE_API_URL` in `.env` if your API uses a different address, and restart SatouBot. The upstream author requires users to host their own API; SatouBot does not install or start it. If it is unavailable, other catalogues can still return results and the search reports an AnimePahe source failure.
+
+Run the API in a separate isolated environment without mounting bot credentials or media. Its upstream scraper evaluates web page scripts and launches Chromium without its sandbox. Search results use AnimePahe's own title and episode IDs; the bot does not guess a match to a different catalogue. Episodes are listed in numeric order per AnimePahe title, up to 100 release pages. AnimePahe does not supply a consistent season number through this API, so the menu labels these entries as Episodes. Files still go through the normal link checks and approval flow. Source availability and any access restrictions depend on AnimePahe and its host. Live AnimePahe and Telegram transfers have not been verified.
+
+
+<!-- /coderabbit-ai-generated:v1 -->
 
 <!-- /coderabbit-ai-generated:v1 -->
 
@@ -102,9 +141,33 @@ Movie-name search and automatic catalogue artwork are available through supporte
 
 Daily Uploads uses the Transfers switch to activate release selection. Open Daily Uploads, choose 4–10 successful uploads per UTC day (default 4), select a channel, and press Start daily transfers. An explicit start activates daily selection on existing installations; it does not start merely because the old transfer setting is already on. The bot browses up to four movie catalogues per enabled add-on, prioritizing recent/new/release/trending catalogue IDs, and sorts titles with catalogue dates from the past 90 days. Availability and release dates depend on the catalogue. This first version selects movies, not automatic episode batches.
 
-One release is offered at a time. Only verified files strictly below 2,000,000,000 bytes appear in Daily Upload choices. Choose a quality/file, press Transfer, then review the name, landscape thumbnail and destination before approving upload. Rename and thumbnail controls remain available before upload starts. Give link returns the source for manual handling and never starts a transfer. Single manual transfers do not contribute to the daily quota.
+<!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:0962dc29ed937891f932ef4610cde78b84af7b077e59672113307b0726bde8a1 -->
+
+<!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:0bf29fe49d11a6afbd436455ed5db8f27809c425ec7109a0b9d781c2b7a0237e -->
+
+One release is offered at a time. Only verified files strictly below 2,000,000,000 bytes appear in Daily Upload choices.
+
+<!-- /coderabbit-ai-generated:v1 -->
+
+<!-- /coderabbit-ai-generated:v1 --> Choose a quality/file, press Transfer, then review the name, landscape thumbnail and destination before approving upload. Rename and thumbnail controls remain available before upload starts. Give link returns the source for manual handling and never starts a transfer. Single manual transfers do not contribute to the daily quota.
+
+<!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:bf898b0397f1592d51a9d435a4fa2962be03b8da2f94724b62d06f0b88d44f61 -->
 
 Daily selections, skipped/no-file titles, title IDs and conservative title/year duplicate checks persist. The next release is checked after upload/skip; a catalogue scan with no candidates waits ten minutes. A failed or uncertain transfer is marked for attention and is never retried automatically. A pending release can be reopened or skipped from Daily Uploads after restart. At the daily quota the bot switches Transfers off; explicitly start another cycle on a later day. Stop transfers prevents new downloads/uploads; already running transfers can finish. Counts use UTC. This is an approval-driven cycle: it cannot publish 4–10 files without your approvals.
+
+### Source history
+
+Open **Source history** to see ready, manual, temporary, and unavailable checks by file host and to turn idle checks on or off. The bot stores these results locally. It uses recent host history to order checked file choices, but every link is checked again before transfer; a previous success does not guarantee a new link works.
+
+After five minutes without user activity, the bot can recheck one randomly selected saved link from an enabled add-on or provider at most once per 15 minutes. Each checked link waits at least 24 hours before another idle check, and longer Retry-After intervals are respected. New user activity cancels an ongoing idle check. Only links discovered with source information after this feature is installed are eligible. The history does not assess catalogue search quality, publish to Telegram, or download files in the background.
+
+<!-- /coderabbit-ai-generated:v1 -->
 
 <!-- /coderabbit-ai-generated:v1 -->
 
@@ -192,9 +255,21 @@ This foundation is not configured to start automatically with the PC. A publishe
 
 <!-- coderabbit-ai-generated-section:v1:2f6ec2ef61772189d265c825017265380efd5c6d9a26ce38492c8508f018fb3d -->
 
-Inline retrieval of already published Telegram files, migration, source refresh, torrent, DASH and M3U8 downloads, generic download-page extraction, automated error retries and channel availability monitoring are not implemented yet.
+<!-- coderabbit-ai-generated:v1 -->
 
-<!-- /coderabbit-ai-generated:v1 --> Search can list HTTP links returned by providers; unsupported formats and files above 2000 MB are saved as links. A size that cannot be verified prevents downloading. Provider success depends on source availability and compatibility; plugin settings screens are not implemented.
+<!-- coderabbit-ai-generated-section:v1:e198d12a2f3c193d663be702e14d7a9f6edd2cfc5edad39072f4766472d23ddb -->
+
+Inline retrieval of already published Telegram files, migration, source refresh, torrent, DASH, encrypted and live HLS downloads, generic download-page extraction, automated error retries and channel availability monitoring are not implemented yet.
+
+<!-- /coderabbit-ai-generated:v1 -->
+
+<!-- /coderabbit-ai-generated:v1 --> <!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:074f3bf4512b0be7380d6e363d7563d026fe34f5a0fac1784ceb8b22e70d3231 -->
+
+Search can list HTTP links returned by providers; unsupported formats and files above 10 GB are saved as links. Direct files require a verified size before download.
+
+<!-- /coderabbit-ai-generated:v1 --> Provider success depends on source availability and compatibility; plugin settings screens are not implemented.
 
 <!-- /coderabbit-ai-generated:v1 -->
 
@@ -226,7 +301,25 @@ Open **Add-ons** (or `/addons`) and send a Stremio catalogue manifest URL, or up
 
 <!-- coderabbit-ai-generated-section:v1:f170a0d2386266b1c93feccf8ae6db1313ece5396e76a4191a369342198d36de -->
 
-File choices show four per page with More/Previous and Cancel. Select a **DW** button to see catalogue details, the actual source filename and verified size, then choose Yes or No. Only Yes starts a download. A separate approval is required before upload. Downloads show the actual filename, downloaded/total bytes, speed and ETA every five seconds, including during stalls, and send a completion notice. The local file is then renamed using the catalogue title, year, detected quality/codec and language labels. Source headers and alternative URLs are retained. Versions above 2000 MB return a saved link for manual download and never enter the download/upload path.
+File choices show four per page with More/Previous and Cancel. <!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:55c2434624d2efa149d30aa6a66e410355cd2feb41cb258d0bc0625777e59281 -->
+
+Select a **DW** or **HLS** button to review the source, then choose Transfer or Give link. Transfer starts a download after approval.
+
+<!-- /coderabbit-ai-generated:v1 --> A separate approval is required before upload. <!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:a4b80ff4a275e67e2e9fe0e75895286cfdfa6f03f908b7da79c882b362f339ee -->
+
+Downloads show the filename, bytes downloaded, speed and ETA every five seconds, including during stalls, and send a completion notice. HLS total size and ETA are shown as unknown.
+
+<!-- /coderabbit-ai-generated:v1 --> The local file is then renamed using the catalogue title, year, detected quality/codec and language labels. Source headers and alternative URLs are retained. <!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:50c1c26cd82f57ca2be7797c1c77be5adbf5b6c1e15d027a63d2627f9b9d9c6b -->
+
+Approved files above 2 GB and up to 10 GB are downloaded locally and are not offered for Telegram upload; files above 10 GB remain links.
+
+<!-- /coderabbit-ai-generated:v1 -->
 
 <!-- /coderabbit-ai-generated:v1 -->
 6. <!-- coderabbit-ai-generated:v1 -->

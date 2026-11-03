@@ -5,7 +5,7 @@ class SearchFunctions:
         if not self.authorized(update): return
         import json
         from .menu import navigation
-        rows = self.store.db.execute("SELECT * FROM jobs WHERE state IN ('oversize','reported','link_only') ORDER BY id DESC LIMIT 20").fetchall()
+        rows = self.store.db.execute("SELECT * FROM jobs WHERE state IN ('oversize','reported','link_only','local_only') ORDER BY id DESC LIMIT 20").fetchall()
         sources = self.store.db.execute('SELECT id,payload FROM source_links ORDER BY id DESC LIMIT 20').fetchall()
         choices = []
         for row in rows:

@@ -30,7 +30,11 @@ from .discovery import Discovery
 from .menu import MenuFunctions, navigation
 from .interface import InterfaceFunctions
 from .series import SeriesFunctions
+from .animepahe import register_default, DEFAULT_API
+from .transfer import MAX_BYTES
 from .daily import DailyFunctions
+from .source_history import SourceHistoryFunctions
+import time
 
 log = logging.getLogger('satoubot')
 current_admin = contextvars.ContextVar('current_admin', default=None)
@@ -48,13 +52,15 @@ def admin_session(handler):
     return wrapped
 
 
-class Bot(DailyFunctions, SeriesFunctions, InterfaceFunctions, MenuFunctions, DestinationFunctions, CatalogueFunctions, DownloadFunctions, UploadFunctions, SearchFunctions, GroupManagementFunctions, MigrationFunctions):
+class Bot(SourceHistoryFunctions, DailyFunctions, SeriesFunctions, InterfaceFunctions, MenuFunctions, DestinationFunctions, CatalogueFunctions, DownloadFunctions, UploadFunctions, SearchFunctions, GroupManagementFunctions, MigrationFunctions):
     def __init__(self, store, media_dir, admin_id, uploader, upload_parallel_parts=1):
         self.store, self.media_dir, self.owner_id, self.uploader = store, media_dir, admin_id, uploader
         if not 1 <= upload_parallel_parts <= 4:
             raise ValueError('UPLOAD_PARALLEL_PARTS must be between 1 and 4')
         self.upload_parallel_parts = upload_parallel_parts
         self.tasks = set()
+        self.last_user_activity = time.monotonic()
+        self.last_idle_check = time.monotonic()
 
     @property
     def admin_id(self):
@@ -227,6 +233,8 @@ class Bot(DailyFunctions, SeriesFunctions, InterfaceFunctions, MenuFunctions, De
             self.spawn(self.perform_download(context, job_id))
             await q.edit_message_reply_markup(reply_markup=None)
         elif action == 'upload' and job['state'] == 'review':
+            if job['size'] > MAX_BYTES:
+                await q.message.reply_text('This file exceeds the 2 GB Telegram upload limit and stays on your PC.'); return
             target = self.store.setting('target')
             if len(parts) != 3 or parts[2] != job['approval_token']:
                 await q.message.reply_text('This preview is out of date. Use the latest preview.')
@@ -379,6 +387,7 @@ def main():
     store.db.execute("UPDATE jobs SET state='upload_unknown' WHERE state='uploading'")
     store.db.execute("UPDATE jobs SET state='failed' WHERE state='downloading'")
     store.db.commit()
+    register_default(store, os.getenv('ANIMEPAHE_API_URL') or DEFAULT_API)
     sessions = SessionManager(root, api_id, api_hash)
     uploader = sessions.user
     try:
@@ -391,7 +400,12 @@ def main():
         await sessions.start()
         bot.cleanup_task = asyncio.create_task(bot.panel_cleaner())
         bot.daily_task = asyncio.create_task(bot.daily_loop(app.bot))
+        bot.source_task = asyncio.create_task(bot.idle_source_loop())
     async def post_shutdown(app):
+        source_task = getattr(bot, 'source_task', None)
+        if source_task:
+            source_task.cancel()
+            await asyncio.gather(source_task, return_exceptions=True)
         daily_task = getattr(bot, 'daily_task', None)
         if daily_task:
             daily_task.cancel()

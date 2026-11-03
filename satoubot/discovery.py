@@ -118,6 +118,13 @@ class Discovery:
     async def search(self, query):
         results, errors = [], []
         for url, kind, manifest in self.manifests():
+            if kind == 'animepahe':
+                try:
+                    from . import animepahe
+                    results.extend(await asyncio.wait_for(animepahe.search(url, query), 15))
+                except Exception:
+                    errors.append(manifest.get('name', 'AnimePahe'))
+                continue
             if kind != 'addon': continue
             for catalog in manifest.get('catalogs', []):
                 media_type = catalog.get('type')
@@ -146,6 +153,10 @@ class Discovery:
             raise ValueError('This catalogue is disabled')
         media_type, item_id = movie.get('type', 'movie'), movie['id']
         manifests = self.manifests()
+        if any(url == movie['addon'] and kind == 'animepahe' for url, kind, _ in manifests):
+            if movie.get('video_id') and movie.get('season') is not None: return movie
+            from . import animepahe
+            return await animepahe.details(movie['addon'], movie)
         candidates = [movie['addon']] + [url for url, kind, manifest in manifests if kind == 'addon' and url != movie['addon'] and supports_resource(manifest, 'meta', media_type, item_id)]
         last_error = None
         for url in candidates:
@@ -202,14 +213,22 @@ class Discovery:
                             tmdb = await plugin_identity()
                             code = (await fetch_bytes(urljoin(url, source['filename']))).decode()
                             found = await run_plugin(code, str(tmdb), 'tv', movie['season'], movie['episode']) if provider_type == 'tv' else await run_plugin(code, str(tmdb))
-                            return [dict(item, provider=name) for item in found[:30]
+                            return [dict(item, provider=name, source_manifest=url, source_provider=source['filename']) for item in found[:30]
                                     if isinstance(item, dict) and isinstance(item.get('url'), str)], None
                         data = await fetch_json(urljoin(url, f'stream/{quote(media_type, safe="")}/{quote(stream_id, safe="")}.json'))
-                        return stream_records(data.get('streams', []), name), None
+                        return [dict(item, source_manifest=url) for item in stream_records(data.get('streams', []), name)], None
                 except ProviderRuntimeError as exc:
                     return [], str(exc)
                 except Exception:
                     return [], name
+
+        async def animepahe_query(url):
+            from . import animepahe
+            try:
+                async with asyncio.timeout(PROVIDER_TIMEOUT):
+                    return await animepahe.streams(url, movie), None
+            except Exception:
+                return [], 'AnimePahe (API)'
 
         async def addon_query(url, manifest):
             origin = urlparse(url).netloc.lower()
@@ -237,6 +256,8 @@ class Discovery:
                     return None, f'{label} could not be loaded'
 
         for url, kind, manifest in manifests:
+            if kind == 'animepahe' and movie.get('addon') == url and movie.get('season') is not None:
+                launch(animepahe_query(url))
             if kind == 'addon':
                 if supports_resource(manifest, 'stream', media_type, stream_id):
                     launch(addon_query(url, manifest))

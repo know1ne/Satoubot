@@ -160,3 +160,11 @@ async def test_probe_limits_redirects(transport):
     handler[0]=lambda req:httpx.Response(302,headers={'location':'https://public.test/loop'})
     assert (await probe('https://public.test/loop'))['status']=='unavailable'
     assert len(calls)==6
+
+
+@pytest.mark.asyncio
+async def test_hls_ignored_range_explains_streaming_is_unsupported(transport):
+    handler,_=transport
+    handler[0]=lambda req:httpx.Response(200,headers={'content-type':'application/vnd.apple.mpegurl'})
+    result=await probe('https://public.test/stream.m3u8')
+    assert result['status']=='manual' and 'HLS' in result['reason']
