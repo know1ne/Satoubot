@@ -28,6 +28,13 @@ from .destinations import DestinationFunctions
 from .catalogue import CatalogueFunctions
 from .discovery import Discovery
 from .menu import MenuFunctions, navigation
+from .interface import InterfaceFunctions
+from .series import SeriesFunctions
+from .animepahe import register_default, DEFAULT_API
+from .transfer import MAX_BYTES
+from .daily import DailyFunctions
+from .source_history import SourceHistoryFunctions
+import time
 
 log = logging.getLogger('satoubot')
 current_admin = contextvars.ContextVar('current_admin', default=None)
@@ -37,18 +44,23 @@ def admin_session(handler):
     async def wrapped(update, context):
         user = update.effective_user or (update.inline_query.from_user if update.inline_query else None)
         token = current_admin.set(user.id if user else None)
-        try: return await handler(update, context)
+        try:
+            owner = getattr(handler, '__self__', None)
+            if owner and owner.authorized(update): owner.touch_panel(context)
+            return await handler(update, context)
         finally: current_admin.reset(token)
     return wrapped
 
 
-class Bot(MenuFunctions, DestinationFunctions, CatalogueFunctions, DownloadFunctions, UploadFunctions, SearchFunctions, GroupManagementFunctions, MigrationFunctions):
+class Bot(SourceHistoryFunctions, DailyFunctions, SeriesFunctions, InterfaceFunctions, MenuFunctions, DestinationFunctions, CatalogueFunctions, DownloadFunctions, UploadFunctions, SearchFunctions, GroupManagementFunctions, MigrationFunctions):
     def __init__(self, store, media_dir, admin_id, uploader, upload_parallel_parts=1):
         self.store, self.media_dir, self.owner_id, self.uploader = store, media_dir, admin_id, uploader
         if not 1 <= upload_parallel_parts <= 4:
             raise ValueError('UPLOAD_PARALLEL_PARTS must be between 1 and 4')
         self.upload_parallel_parts = upload_parallel_parts
         self.tasks = set()
+        self.last_user_activity = time.monotonic()
+        self.last_idle_check = time.monotonic()
 
     @property
     def admin_id(self):
@@ -88,12 +100,10 @@ class Bot(MenuFunctions, DestinationFunctions, CatalogueFunctions, DownloadFunct
                 key = int(context.args[0].split('_', 1)[1])
             except ValueError:
                 return
-            if getattr(self, 'discovery_tasks', None):
-                await update.message.reply_text('A search is processing. Please wait.')
-                return
-            self.launch_discovery(self.safe_movie_card(context, key))
+            await self.start_panel_task('movie', 'Finding available files and checking sizes…', lambda: self.safe_movie_card(context, key), context)
             return
-        await update.message.reply_text('Opening menu…', reply_markup=ReplyKeyboardRemove())
+        notice = await update.message.reply_text('Opening menu…', reply_markup=ReplyKeyboardRemove())
+        self.panel().retired.append(notice)
         await self.main_menu(update.message)
 
     async def status(self, update, context):
@@ -125,7 +135,7 @@ class Bot(MenuFunctions, DestinationFunctions, CatalogueFunctions, DownloadFunct
         if text == 'Help': return await self.start(update, context)
         if text in ('Start transfers', 'Stop transfers'):
             enabled = text == 'Start transfers'
-            self.store.set_setting('transfers_enabled', '1' if enabled else '0')
+            self.set_transfers(enabled)
             notice = ' Transfers already running will finish.' if not enabled and self.transfer_busy() else ''
             await update.message.reply_text(f'Transfers are {"on" if enabled else "off"}.{notice}')
             return
@@ -151,9 +161,9 @@ class Bot(MenuFunctions, DestinationFunctions, CatalogueFunctions, DownloadFunct
                     name, kind = Discovery(self.store).register(text, uploaded)
                 else:
                     name, kind = await Discovery(self.store).add(text)
-                await update.message.reply_text(f'Saved {name} ({kind}). Use /search <movie name>.')
+                await self.show_panel(update.message, f'Saved {name} ({kind}). Send a movie title to search.', reply_markup=InlineKeyboardMarkup([navigation()]))
             except Exception:
-                await update.message.reply_text('Could not read that manifest. Open Add-ons and send its original manifest URL.')
+                await self.show_panel(update.message, 'Could not read that manifest. Open Add-ons and send its original manifest URL.', reply_markup=InlineKeyboardMarkup([navigation()]))
             return
         if context.user_data.pop('catalogue_search_pending', False):
             return await self.begin_search(update.message, text)
@@ -167,6 +177,23 @@ class Bot(MenuFunctions, DestinationFunctions, CatalogueFunctions, DownloadFunct
         if not self.authorized(update): return
         q = update.callback_query
         await q.answer()
+        if q.data.startswith('daily:'):
+            return await self.daily_callback(update, context)
+        if q.data.startswith('directmanual:'):
+            try: entry = self.store.cached(int(q.data.split(':')[1]), 'manual_link')
+            except ValueError: return
+            if entry: await q.message.reply_text(entry['url'], disable_web_page_preview=True)
+            return
+        if q.data.startswith('directlink:'):
+            try: job = self.store.get(int(q.data.split(':')[1]))
+            except ValueError: return
+            if job:
+                await q.message.reply_text(job['source'], disable_web_page_preview=True)
+            return
+        if q.data.startswith(('season:', 'seasons:')):
+            return await self.series_callback(update, context)
+        if q.data.startswith(('addonpage:', 'addonproviders:', 'addontoggle:')):
+            return await self.addon_callback(update, context)
         if q.data.startswith('directretry:'):
             try: source=self.store.cached(int(q.data.split(':')[1]), 'direct_retry')
             except (ValueError, IndexError): return
@@ -178,7 +205,7 @@ class Bot(MenuFunctions, DestinationFunctions, CatalogueFunctions, DownloadFunct
             return await self.menu_callback(update, context)
         if q.data == 'destcancel' or q.data.startswith(('dest:', 'choose_dest:')):
             return await self.select_destination(update, context)
-        if q.data in ('defaultproviders', 'searchagain') or q.data.startswith(('movie:', 'file:', 'retryfile:', 'page:', 'cancelpage:', 'yes:', 'no:')):
+        if q.data in ('defaultproviders', 'searchagain') or q.data.startswith(('movie:', 'file:', 'retryfile:', 'page:', 'cancelpage:', 'yes:', 'no:', 'link:')):
             return await self.catalogue_callback(update, context)
         try:
             parts = q.data.split(':')
@@ -206,6 +233,8 @@ class Bot(MenuFunctions, DestinationFunctions, CatalogueFunctions, DownloadFunct
             self.spawn(self.perform_download(context, job_id))
             await q.edit_message_reply_markup(reply_markup=None)
         elif action == 'upload' and job['state'] == 'review':
+            if job['size'] > MAX_BYTES:
+                await q.message.reply_text('This file exceeds the 2 GB Telegram upload limit and stays on your PC.'); return
             target = self.store.setting('target')
             if len(parts) != 3 or parts[2] != job['approval_token']:
                 await q.message.reply_text('This preview is out of date. Use the latest preview.')
@@ -338,9 +367,10 @@ class Bot(MenuFunctions, DestinationFunctions, CatalogueFunctions, DownloadFunct
         if not self.authorized(update): return
         rows = self.store.db.execute("SELECT id FROM jobs WHERE state='review' ORDER BY id LIMIT 20").fetchall()
         if not rows:
-            await update.message.reply_text('No files awaiting review.'); return
-        for row in rows:
-            await self.preview(context, row['id'])
+            await self.show_panel(update.message, 'No files awaiting review.', reply_markup=InlineKeyboardMarkup([navigation()])); return
+        keyboard = [[InlineKeyboardButton(f'Item #{row["id"]}', callback_data=f'menu:review:{row["id"]}')] for row in rows]
+        keyboard.append(navigation())
+        await self.show_panel(update.message, 'Choose a file to review.', reply_markup=InlineKeyboardMarkup(keyboard))
 
 
 def main():
@@ -357,6 +387,7 @@ def main():
     store.db.execute("UPDATE jobs SET state='upload_unknown' WHERE state='uploading'")
     store.db.execute("UPDATE jobs SET state='failed' WHERE state='downloading'")
     store.db.commit()
+    register_default(store, os.getenv('ANIMEPAHE_API_URL') or DEFAULT_API)
     sessions = SessionManager(root, api_id, api_hash)
     uploader = sessions.user
     try:
@@ -367,7 +398,22 @@ def main():
 
     async def post_init(app):
         await sessions.start()
+        bot.cleanup_task = asyncio.create_task(bot.panel_cleaner())
+        bot.daily_task = asyncio.create_task(bot.daily_loop(app.bot))
+        bot.source_task = asyncio.create_task(bot.idle_source_loop())
     async def post_shutdown(app):
+        source_task = getattr(bot, 'source_task', None)
+        if source_task:
+            source_task.cancel()
+            await asyncio.gather(source_task, return_exceptions=True)
+        daily_task = getattr(bot, 'daily_task', None)
+        if daily_task:
+            daily_task.cancel()
+            await asyncio.gather(daily_task, return_exceptions=True)
+        cleanup_task = getattr(bot, 'cleanup_task', None)
+        if cleanup_task:
+            cleanup_task.cancel()
+            await asyncio.gather(cleanup_task, return_exceptions=True)
         for task in list(bot.tasks):
             task.cancel()
         if bot.tasks:
@@ -388,6 +434,7 @@ def main():
     application.add_handler(InlineQueryHandler(admin_session(bot.inline_search)))
     application.add_handler(CommandHandler('saved', admin_session(bot.saved)))
     application.add_handler(CommandHandler('pending', admin_session(bot.pending)))
+    application.add_handler(CommandHandler('migration', admin_session(bot.migration_menu)))
     application.add_handler(CallbackQueryHandler(admin_session(bot.callback)))
     application.add_handler(MessageHandler(filters.StatusUpdate.CHAT_SHARED, admin_session(bot.chat_shared)))
     application.add_handler(MessageHandler(filters.PHOTO, admin_session(bot.thumbnail_photo)))

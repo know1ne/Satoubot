@@ -22,15 +22,14 @@ class DestinationFunctions:
                 key=self.store.cache('destination',{'target':chat_id,'job':job_id,'title':dialog.name})
                 rows.append([Button(dialog.name[:80],callback_data=f'dest:{key}')])
         except Exception:
-            await context.bot.send_message(self.admin_id,'Could not list your channels. Check the user session and try again.');return
-        rows.append([Button('Cancel',callback_data='destcancel')])
+            await self.show_panel(None, 'Could not list your channels. Check the user session and try again.', context=context, reply_markup=Markup([navigation()]));return
         rows.append(navigation())
-        await context.bot.send_message(self.admin_id,'Select a channel or group you own. Only chats where the bot is an administrator are listed. Add the bot as admin and retry if yours is missing.',reply_markup=Markup(rows))
+        await self.show_panel(None, 'Select a channel or group you own. Only chats where the bot is an administrator are listed. Add the bot as admin and retry if yours is missing.',reply_markup=Markup(rows), context=context)
 
     async def select_destination(self, update, context):
         q=update.callback_query
         if q.data=='destcancel':
-            await q.edit_message_reply_markup(reply_markup=None);return
+            return await self.main_menu(q.message)
         if q.data.startswith('choose_dest:'):
             try: job_id=int(q.data.split(':')[1])
             except ValueError:return

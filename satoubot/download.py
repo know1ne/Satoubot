@@ -9,7 +9,8 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from .menu import navigation
 from .progress import format_progress
 from .file_info import probe
-from .transfer import MAX_BYTES, download, filename_from_url, inspect_url, safe_name
+from .hls import download_hls, inspect_hls, HLSError
+from .transfer import MAX_BYTES, MAX_DOWNLOAD_BYTES, download, filename_from_url, inspect_url, safe_name
 
 log = logging.getLogger("satoubot")
 
@@ -20,17 +21,32 @@ class DownloadFunctions:
             await update.message.reply_text(f'This link already has item #{old["id"]} ({old["state"]}).')
             return
         info=await probe(text)
+        if info.get('hls_candidate'):
+            try: plan = await inspect_hls(text)
+            except HLSError as exc:
+                manual = self.store.cache('manual_link', {'url':text})
+                await update.message.reply_text(f'{exc}. Use the link manually.', reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('Give link', callback_data=f'directmanual:{manual}')], navigation()])); return
+            except Exception:
+                manual = self.store.cache('manual_link', {'url':text})
+                await update.message.reply_text('Could not read the HLS playlist. Try again or use the link manually.', reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('Give link', callback_data=f'directmanual:{manual}')], navigation()])); return
+            name = Path(filename_from_url(text)).stem + '.' + plan['format']
+            job = self.store.create(text, Path(name).stem, name, 0)
+            self.store.set_setting(f'job:{job}:hls', plan['format'])
+            keyboard = InlineKeyboardMarkup([[InlineKeyboardButton('Transfer', callback_data=f'dl:{job}'), InlineKeyboardButton('Give link', callback_data=f'directlink:{job}'), InlineKeyboardButton('No', callback_data=f'skip:{job}')], navigation()])
+            await update.message.reply_text(f'Item #{job}\nName: {name}\nSize: unknown. Local download limit: 10 GB. Telegram upload available only at or below 2 GB.\nDownload this file?', reply_markup=keyboard)
+            return
         if info.get('status') != 'ready' or not info.get('size'):
             reason=info.get('reason','Size unknown')
             retry=info.get('retry_after')
-            keyboard=None
+            manual = self.store.cache('manual_link', {'url':text})
+            keyboard=InlineKeyboardMarkup([[InlineKeyboardButton('Give link', callback_data=f'directmanual:{manual}')], navigation()])
             if info.get('status') == 'temporary':
                 key=self.store.cache('direct_retry', {'url':text})
-                keyboard=InlineKeyboardMarkup([[InlineKeyboardButton('Retry check', callback_data=f'directretry:{key}')], navigation()])
+                keyboard=InlineKeyboardMarkup([[InlineKeyboardButton('Retry check', callback_data=f'directretry:{key}'), InlineKeyboardButton('Give link', callback_data=f'directmanual:{manual}')], navigation()])
             await update.message.reply_text(f"{reason}." + (f" Retry after {retry}." if retry else ''), reply_markup=keyboard)
             return
         size, content_type=info['size'],info.get('content_type','')
-        if size > MAX_BYTES:
+        if size > MAX_DOWNLOAD_BYTES:
             name = info.get('filename') or filename_from_url(text)
             job = self.store.create(text, Path(name).stem, name, size)
             self.store.update(job, state='oversize')
@@ -42,8 +58,8 @@ class DownloadFunctions:
             return
         name = info.get('filename') or filename_from_url(text)
         job = self.store.create(text, Path(name).stem, name, size)
-        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton('Yes', callback_data=f'dl:{job}'), InlineKeyboardButton('No', callback_data=f'skip:{job}')], navigation()])
-        await update.message.reply_text(f'Item #{job}\nName: {name}\nEstimated size: {size / 1_000_000:.1f} MB\nDownload this file?', reply_markup=keyboard)
+        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton('Transfer', callback_data=f'dl:{job}'), InlineKeyboardButton('Give link', callback_data=f'directlink:{job}'), InlineKeyboardButton('No', callback_data=f'skip:{job}')], navigation()])
+        await update.message.reply_text(f'Item #{job}\nName: {name}\nEstimated size: {size / 1_000_000:.1f} MB\n' + ('Above the 2 GB Telegram limit; this file will be saved locally.\n' if size > MAX_BYTES else '') + 'Download this file?', reply_markup=keyboard)
 
 
     async def perform_download(self, context, job_id):
@@ -54,6 +70,8 @@ class DownloadFunctions:
         last_bytes=0
         started=time.monotonic()
         original=self.store.setting(f'job:{job_id}:original',job['filename'])
+        hls_format=self.store.setting(f'job:{job_id}:hls')
+        actual_size=job['size']
         async def progress(done,total,speed):
             nonlocal done_bytes
             done_bytes=done
@@ -68,15 +86,17 @@ class DownloadFunctions:
                 eta=f'{(job["size"]-done_bytes)/speed/60:.1f} min' if speed else 'waiting for data'
                 try:
                     if message:
-                        await message.edit_text(format_progress(f'{stage} download #{job_id}',original,done_bytes,job['size'],speed))
+                        await message.edit_text(format_progress(f'{stage} download #{job_id}',original,done_bytes,None if hls_format else job['size'],speed))
+                    await self.panel_status(context, 'transfer', format_progress(f'{stage} download #{job_id}', original, done_bytes, None if hls_format else job['size'], speed))
                 except Exception: pass
         timer=asyncio.create_task(ticker())
         try:
+            await self.panel_status(context, 'transfer', f'Downloading #{job_id} · {original}')
             folder = self.media_dir / str(job_id)
             folder.mkdir(exist_ok=True)
             path = folder / safe_name(original)
             try:
-                message = await context.bot.send_message(self.admin_id, f'Connecting download #{job_id}\n{original}\nSize: {job["size"]/1_000_000:.1f} MB')
+                message = await context.bot.send_message(self.admin_id, f'Connecting download #{job_id}\n{original}\nSize: ' + ('unknown' if hls_format else f'{job["size"]/1_000_000:.1f} MB'))
             except Exception as exc:
                 log.warning('Download progress message %s failed: %s', job_id, type(exc).__name__)
             if message:
@@ -84,16 +104,23 @@ class DownloadFunctions:
                 except Exception: pass
             source_headers=json.loads(self.store.setting(f'job:{job_id}:headers', '{}'))
             check=await probe(job['source'],source_headers)
-            if check.get('status') != 'ready' or check.get('size') != job['size']:
+            if (hls_format and not check.get('hls_candidate')) or (not hls_format and (check.get('status') != 'ready' or check.get('size') != job['size'])):
                 self.store.update(job_id, state='failed', error='Source changed')
                 await context.bot.send_message(self.admin_id, f"Link status changed: {check.get('reason','size changed')}. Search again before retrying.")
                 return
+            if not self.transfers_enabled():
+                self.store.update(job_id, state='cancelled', error='Transfers switched off')
+                if message: await message.edit_text('Transfers are off. Download cancelled before starting.')
+                return
             stage='Transferring'
-            await download(job['source'], path, job['size'], progress, headers=source_headers)
+            if hls_format:
+                actual_size=await download_hls(job['source'], path, hls_format, progress, headers=source_headers, quality=self.store.setting(f'job:{job_id}:quality'))
+            else:
+                await download(job['source'], path, job['size'], progress, headers=source_headers)
             stage='Checking'
             approved=folder/job['filename']
             if approved != path: path.rename(approved)
-            self.store.update(job_id, state='review', path=str(approved))
+            self.store.update(job_id, state='local_only' if actual_size > MAX_BYTES else 'review', path=str(approved), size=actual_size)
         except asyncio.CancelledError:
             self.store.update(job_id, state='cancelled', error='Cancelled')
             if message:
@@ -106,13 +133,18 @@ class DownloadFunctions:
             if message:
                 try: await message.edit_text(f'Download failed: {original}. Search again to retry.')
                 except Exception: pass
-            await context.bot.send_message(self.admin_id, f'Download #{job_id} failed ({type(exc).__name__}). Check the source and search again to retry.')
+            reason = str(exc) if isinstance(exc, HLSError) else 'Check the source and search again to retry'
+            await context.bot.send_message(self.admin_id, f'Download #{job_id} failed: {reason}.')
             return
         finally:
             timer.cancel()
             await asyncio.gather(timer,return_exceptions=True)
+            await self.panel_status(context, 'transfer')
         try:
-            await context.bot.send_message(self.admin_id,f'Download done: {original} ({job["size"]/1_000_000:.1f} MB). Review the proposed upload name below.')
-            await self.preview(context, job_id)
+            if actual_size > MAX_BYTES:
+                await context.bot.send_message(self.admin_id, f'Download done: {job["filename"]} ({actual_size/1_000_000:.1f} MB). Saved locally: {approved}\nAbove the 2 GB Telegram upload limit; open this file on your PC.')
+            else:
+                await context.bot.send_message(self.admin_id,f'Download done: {original} ({actual_size/1_000_000:.1f} MB). Review the proposed upload name below.')
+                await self.preview(context, job_id)
         except Exception as exc:
             log.warning('Preview %s failed: %s', job_id, type(exc).__name__)

@@ -42,7 +42,7 @@ class Store:
         return self.db.execute('SELECT * FROM jobs WHERE id=?', (job_id,)).fetchone()
 
     def update(self, job_id, **changes):
-        allowed = {'title','filename','path','thumbnail','state','target','telegram_message_id','error','approval_token'}
+        allowed = {'title','filename','size','path','thumbnail','state','target','telegram_message_id','error','approval_token'}
         if not changes or not set(changes).issubset(allowed):
             raise ValueError('invalid update')
         fields = ','.join(f'{key}=?' for key in changes)

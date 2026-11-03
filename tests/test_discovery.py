@@ -1,3 +1,4 @@
+import asyncio
 import json
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
@@ -68,9 +69,18 @@ async def test_file_callback_respects_off_and_unknown_size_never_downloads(tmp_p
     bot = Bot(store, tmp_path, 42, MagicMock())
     q = MagicMock(); q.data = f'file:{key}'; q.answer = AsyncMock(); q.message.reply_text = AsyncMock()
     update = MagicMock(); update.effective_user.id=42; update.effective_chat.type='private'; update.callback_query=q
-    await bot.callback(update, MagicMock())
+    context=MagicMock();context.bot.send_message=AsyncMock()
+    bot.prepare_choice=AsyncMock()
+    await bot.callback(update, context)
+    await asyncio.gather(*bot.discovery_tasks)
+    bot.prepare_choice.assert_awaited_once()
+    assert not bot.tasks
+    # Transfer approval itself remains gated while off.
+    confirmation=store.cache('confirmation',stream)
+    q.data=f'yes:{confirmation}'
+    await bot.callback(update,context)
     assert not bot.tasks and 'off' in q.message.reply_text.await_args.args[0]
-    monkeypatch.setattr('satoubot.catalogue.inspect_url', AsyncMock(side_effect=ValueError()))
+    del bot.prepare_choice
     context = MagicMock(); context.bot.send_message=AsyncMock()
     await bot.download_choice(context, stream)
     assert not store.find_source(stream['url'])
@@ -188,9 +198,9 @@ async def test_yes_no_confirmation_and_duplicate_yes_never_double_download(tmp_p
 async def test_large_source_returns_link_even_when_off_without_probe_or_download(tmp_path,monkeypatch):
     store=Store(tmp_path/'db');store.set_setting('transfers_enabled','0')
     bot=Bot(store,tmp_path,42,MagicMock())
-    probe_mock=AsyncMock(return_value={'status':'ready','size':3_000_000_000,'filename':'large.mkv','content_type':'video/x-matroska'});monkeypatch.setattr('satoubot.catalogue.probe',probe_mock)
+    probe_mock=AsyncMock(return_value={'status':'ready','size':10_000_000_001,'filename':'large.mkv','content_type':'video/x-matroska'});monkeypatch.setattr('satoubot.catalogue.probe',probe_mock)
     context=MagicMock();context.bot.send_message=AsyncMock()
-    await bot.prepare_choice(context,{'url':'https://file.test/large.mkv','size':3_000_000_000,'movie':{'name':'Example'},'quality':'1080p'})
+    await bot.prepare_choice(context,{'url':'https://file.test/large.mkv','size':10_000_000_001,'movie':{'name':'Example'},'quality':'1080p'})
     assert 'Download it manually' in context.bot.send_message.await_args.args[1]
     assert 'https://file.test/large.mkv' in context.bot.send_message.await_args.args[1]
     probe_mock.assert_awaited_once()
@@ -224,7 +234,8 @@ async def test_owned_destinations_require_bot_admin_and_selection_needs_fresh_ap
     context=MagicMock();context.bot.id=123;context.bot.send_message=AsyncMock();context.bot.get_chat_member=AsyncMock(return_value=SimpleNamespace(status='administrator',can_post_messages=True))
     await bot.destination_menu(context)
     rows=context.bot.send_message.await_args.kwargs['reply_markup'].inline_keyboard
-    assert len(rows)==3 and rows[0][0].text=='Owned'
+    assert len(rows)==2 and rows[0][0].text=='Owned'
+    assert [button.text for button in rows[-1]] == ['Back', 'Cancel', 'Main menu']
     q=MagicMock();q.data=rows[0][0].callback_data;q.edit_message_reply_markup=AsyncMock();q.message.reply_text=AsyncMock()
     update=MagicMock();update.callback_query=q
     await bot.select_destination(update,context)
@@ -292,3 +303,24 @@ async def test_runtime_error_is_reported_in_movie_card(tmp_path, monkeypatch):
     context=MagicMock(); context.bot.send_message=AsyncMock()
     await bot.movie_card(context,key)
     assert 'Node.js 24 or newer is required' in context.bot.send_message.await_args.args[1]
+
+
+def test_downloadable_results_first_across_pages_without_losing_manual_or_failures(tmp_path):
+    store=Store(tmp_path/'db');bot=Bot(store,tmp_path,42,MagicMock())
+    def cache(n,status,size,kind='stream'):
+        return store.cache(kind, {'url':f'https://file.test/{n}', 'quality':str(n), 'size':size, 'check_status':status})
+    manual=cache('manual','manual',100)
+    dead=-cache('dead','unavailable',None,'unchecked')
+    large=cache('large','ready',10_000_000_001)
+    ready1=cache('first','ready',100)
+    unknown=cache('unknown','ready',None)
+    ready2=cache('second','ready',200)
+    ids=[manual,dead,large,ready1,unknown,ready2]
+    page=store.cache('pages',ids)
+    first=bot.file_page(page,ids,0).inline_keyboard
+    assert [row[0].callback_data for row in first[:4]] == [f'file:{ready1}',f'file:{ready2}',f'file:{manual}',f'retryfile:{-dead}']
+    assert first[0][0].text.startswith('DW ')
+    assert first[2][0].text.startswith('Manual ') and first[3][0].text.startswith('Unavailable ')
+    second=bot.file_page(page,ids,1).inline_keyboard
+    assert [row[0].callback_data for row in second[:2]] == [f'file:{large}',f'file:{unknown}']
+    assert second[0][0].text.startswith('Link ') and second[1][0].text.startswith('Size unknown ')

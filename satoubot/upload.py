@@ -1,11 +1,13 @@
 import asyncio
 import logging
 import time
+from pathlib import Path
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telethon import utils
 from .parallel_upload import upload_parts
 from .progress import format_progress
+from .transfer import MAX_BYTES
 
 log = logging.getLogger('satoubot')
 
@@ -13,10 +15,18 @@ log = logging.getLogger('satoubot')
 class UploadFunctions:
     async def perform_upload(self, context, job_id):
         job = self.store.get(job_id)
+        try: actual_size = Path(job['path']).stat().st_size
+        except (OSError, TypeError): actual_size = job['size']
+        if max(job['size'], actual_size) > MAX_BYTES:
+            self.store.update(job_id, state='local_only', size=max(job['size'], actual_size))
+            await context.bot.send_message(self.admin_id, 'This file exceeds the 2 GB Telegram upload limit and remains on your PC.')
+            return
         try:
+            await self.panel_status(context, 'transfer', f'Uploading #{job_id} · {job["filename"]}')
             message = await context.bot.send_message(self.admin_id, f'Connecting upload #{job_id}\n{job["filename"]}')
         except asyncio.CancelledError:
             self.store.update(job_id, state='upload_unknown', error='Cancelled')
+            await self.panel_status(context, 'transfer')
             raise
         except Exception as exc:
             message = None
@@ -35,6 +45,7 @@ class UploadFunctions:
                 try:
                     if message:
                         await message.edit_text(format_progress(f'Transferring upload #{job_id}',job['filename'],done_bytes,total_bytes,speed))
+                    await self.panel_status(context, 'transfer', format_progress(f'Transferring upload #{job_id}', job['filename'], done_bytes, total_bytes, speed))
                 except Exception:
                     pass
         timer = asyncio.create_task(ticker())
@@ -47,6 +58,9 @@ class UploadFunctions:
                 upload_file = await upload_parts(self.uploader, job['path'], job['size'], self.upload_parallel_parts, progress)
             result = await self.uploader.send_file(int(job['target']), upload_file, caption=job['title'], thumb=job['thumbnail'] or None, progress_callback=progress, **extra)
             self.store.update(job_id, state='published', telegram_message_id=result.id)
+            self.daily_init()
+            self.store.db.execute("UPDATE daily_titles SET state='published', published_day=? WHERE job_id=?", (self.daily_day(), job_id))
+            self.store.db.commit()
         except asyncio.CancelledError:
             self.store.update(job_id, state='upload_unknown', error='Cancelled')
             if message:
@@ -65,6 +79,7 @@ class UploadFunctions:
         finally:
             timer.cancel()
             await asyncio.gather(timer,return_exceptions=True)
+            await self.panel_status(context, 'transfer')
         if message:
             try: await message.edit_text(f'Upload completed: {job["filename"]}')
             except Exception: pass

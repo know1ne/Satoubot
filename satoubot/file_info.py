@@ -79,8 +79,13 @@ async def probe(url, headers=None):
                     if b'file_rate_limited_captcha_required' in body.lower():
                         return {'status':'manual','reason':'Pixeldrain CAPTCHA required; manual download required'}
                 await response.aclose()
-                reason='Web page; manual download required' if 'text/html' in content_type else 'Source ignored the small range request; manual download required'
-                return {'status':'manual','reason':reason}
+                if 'text/html' in content_type:
+                    reason = 'Web page; manual download required'
+                elif 'mpegurl' in content_type or urlparse(final).path.lower().endswith('.m3u8'):
+                    reason = 'HLS streaming playlist; download is not supported yet'
+                else:
+                    reason = 'Source ignored the small range request; manual download required'
+                return {'status':'manual','reason':reason, 'hls_candidate': reason.startswith('HLS streaming')}
             async for chunk in response.aiter_raw(chunk_size=512):
                 sample+=chunk[:512-len(sample)]
                 if len(sample)>=512:break
@@ -93,7 +98,9 @@ async def probe(url, headers=None):
             if status==429 or status>=500: return _temporary(url,response_headers)
             if status!=206: return {'status':'manual','reason':'Source did not provide a valid media range'}
             content_type=(response_headers.get('content-type') or head_headers.get('content-type') or '').lower()
-            if any(t in content_type for t in ('mpegurl','dash+xml')) or urlparse(final).path.lower().endswith(('.m3u8','.mpd')):
+            if 'mpegurl' in content_type or urlparse(final).path.lower().endswith('.m3u8'):
+                return {'status':'manual','reason':'HLS streaming playlist', 'hls_candidate':True}
+            if 'dash+xml' in content_type or urlparse(final).path.lower().endswith('.mpd'):
                 return {'status':'manual','reason':'Streaming playlist; manual download required'}
             if 'text/html' in content_type or 'text/plain' in content_type or 'application/json' in content_type or lower.lstrip().startswith((b'<!doctype html',b'<html',b'{')) or (end == 0 and lower == b'<') or b'captcha' in lower:
                 return {'status':'manual','reason':'Web page, provider error or CAPTCHA; manual download required'}
@@ -116,6 +123,8 @@ async def probe(url, headers=None):
 
 def clean_title(movie, stream):
     title=str(movie.get('name','Movie'))
+    if movie.get('season') is not None:
+        title += (f' Episode {int(movie["episode"]):02d}' if movie.get('animepahe_episodes') else f' S{int(movie["season"]):02d}E{int(movie["episode"]):02d}')
     year=str(movie.get('year') or movie.get('releaseInfo') or '')[:4]
     details=' '.join(str(stream.get(k) or '') for k in ('quality','title','name','filename','language','description'))
     details=re.sub(r'[._-]+',' ',details)

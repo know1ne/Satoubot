@@ -8,7 +8,8 @@ from urllib.parse import unquote, urlparse
 import httpx
 from .public_transport import PublicTransport
 
-MAX_BYTES = 2_000_000_000
+MAX_BYTES = 2_000_000_000  # Telegram upload limit
+MAX_DOWNLOAD_BYTES = 10_000_000_000
 
 
 def safe_name(value: str) -> str:
@@ -39,8 +40,8 @@ async def inspect_url(url, headers=None):
 
 async def download_sequential(url, destination: Path, expected_size: int, progress, headers=None):
     """Stream with a hard limit even if the server sends more than its advertised size."""
-    if expected_size > MAX_BYTES or expected_size <= 0:
-        raise ValueError('File exceeds the 2000 MB limit or has an unknown size.')
+    if expected_size > MAX_DOWNLOAD_BYTES or expected_size <= 0:
+        raise ValueError('File exceeds the 10 GB local limit or has an unknown size.')
     temporary = destination.with_suffix(destination.suffix + '.part')
     total = 0
     started = time.monotonic()
@@ -51,8 +52,8 @@ async def download_sequential(url, destination: Path, expected_size: int, progre
                 with temporary.open('wb') as output:
                     async for chunk in response.aiter_bytes(256 * 1024):
                         total += len(chunk)
-                        if total > MAX_BYTES or total > expected_size:
-                            raise ValueError('Download exceeded its reported size or the 2000 MB limit.')
+                        if total > MAX_DOWNLOAD_BYTES or total > expected_size:
+                            raise ValueError('Download exceeded its reported size or the 10 GB local limit.')
                         output.write(chunk)
                         now = time.monotonic()
                         await progress(total, expected_size, readable_speed(total, now - started))
@@ -67,8 +68,8 @@ async def download_sequential(url, destination: Path, expected_size: int, progre
 
 async def download(url, destination: Path, expected_size: int, progress, connections=4, headers=None):
     """Use verified byte ranges when the server supplies a stable validator."""
-    if expected_size > MAX_BYTES or expected_size <= 0:
-        raise ValueError('File exceeds the 2000 MB limit or has an unknown size.')
+    if expected_size > MAX_DOWNLOAD_BYTES or expected_size <= 0:
+        raise ValueError('File exceeds the 10 GB local limit or has an unknown size.')
     if expected_size < 4 * 1024 * 1024 or connections < 2:
         return await download_sequential(url, destination, expected_size, progress, headers=headers)
     headers = {**(headers or {}), 'Accept-Encoding': 'identity'}

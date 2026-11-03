@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from satoubot.store import Store
-from satoubot.transfer import MAX_BYTES, download, safe_name
+from satoubot.transfer import MAX_BYTES, MAX_DOWNLOAD_BYTES, download, safe_name
 from satoubot.app import Bot
 
 
@@ -25,7 +25,7 @@ def test_safe_name_blocks_path_traversal():
 @pytest.mark.asyncio
 async def test_reject_oversize_without_request(tmp_path):
     with pytest.raises(ValueError):
-        await download('https://example.org/file', tmp_path / 'file', MAX_BYTES + 1, AsyncMock())
+        await download('https://example.org/file', tmp_path / 'file', MAX_DOWNLOAD_BYTES + 1, AsyncMock())
     assert not list(tmp_path.iterdir())
 
 
