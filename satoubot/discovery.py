@@ -119,9 +119,11 @@ class Discovery:
         results, errors = [], []
         for url, kind, manifest in self.manifests():
             if kind == 'animepahe':
+                from . import animepahe
                 try:
-                    from . import animepahe
-                    results.extend(await asyncio.wait_for(animepahe.search(url, query), 15))
+                    results.extend(await asyncio.wait_for(animepahe.search(url, query), 45))
+                except animepahe.RateLimitError:
+                    errors.append(manifest.get('name', 'AnimePahe') + ' (rate limited)')
                 except Exception:
                     errors.append(manifest.get('name', 'AnimePahe'))
                 continue

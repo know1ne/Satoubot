@@ -13,6 +13,7 @@ from .transfer import MAX_BYTES, MAX_DOWNLOAD_BYTES, inspect_url, safe_name
 from .file_info import probe, clean_title
 from .source_history import record_check, reliability
 from .hls import inspect_hls, HLSError
+from .animepahe import RateLimitError
 
 
 class CatalogueFunctions:
@@ -137,7 +138,9 @@ class CatalogueFunctions:
             if errors:
                 text += '\nSome catalogues failed. Try again later.'
                 from .animepahe import NAME
-                if NAME in errors:
+                if NAME + ' (rate limited)' in errors:
+                    text += '\nAnimePahe is rate limiting requests. Wait before trying again.'
+                elif NAME in errors:
                     text += '\nAnimePahe API failed or timed out. Check its container logs and ANIMEPAHE_API_URL. No manifest is needed for AnimePahe.'
             key = self.store.cache('search_panel', {'text': text, 'buttons': result_buttons})
             panel = self.panel()
@@ -422,6 +425,8 @@ class CatalogueFunctions:
                 await self.series_menu(context, movie)
             else:
                 await self.movie_card(context, key)
+        except RateLimitError:
+            await context.bot.send_message(self.admin_id, 'AnimePahe is rate limiting requests. Wait before trying again.')
         except Exception:
             await context.bot.send_message(self.admin_id, 'Could not fetch file results. Please try /search again.')
 

@@ -1,6 +1,7 @@
 import asyncio
 import json
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from types import SimpleNamespace
 from urllib.parse import urlparse, parse_qs
@@ -13,6 +14,16 @@ from satoubot.discovery import Discovery
 from satoubot.file_info import clean_title
 from satoubot.series import ordered_episodes
 from satoubot.store import Store
+
+
+@pytest.fixture(autouse=True)
+def fast_api_for_tests(monkeypatch):
+    monkeypatch.setattr(animepahe, 'REQUEST_INTERVAL', 0)
+    yield
+    animepahe._cooldowns.clear()
+    animepahe._next_requests.clear()
+    animepahe._request_locks.clear()
+    animepahe._response_cache.clear()
 
 
 @pytest.fixture
@@ -45,7 +56,10 @@ async def test_builtin_search_paged_episodes_and_stream_identity(tmp_path,api):
     results,errors=await service.search('One Piece')
     assert not errors and len(results)==1 and results[0]['animepahe_session']=='anime-123'
     movie=await service.details(results[0]);episodes=ordered_episodes(movie)
-    assert [e['episode'] for e in episodes]==[1,2]
+    assert [e['episode'] for e in episodes]==[1]
+    latest = await animepahe.release_page(base, movie, 1)
+    assert [e['episode'] for e in ordered_episodes(latest)] == [2]
+    assert len([c for c in calls if c[0].endswith('/releases')]) == 2
     assert clean_title(dict(movie,season=1,episode=2),{}).startswith('One Piece Episode 02')
     selected=dict(movie,season=1,episode=2,video_id='episode-2')
     prior_count=len(calls)
@@ -107,6 +121,7 @@ async def test_api_retry_after_blocks_other_endpoints():
     base=f'http://127.0.0.1:{server.server_port}/'
     try:
         with pytest.raises(ValueError,match='rate limited'): await animepahe.request(base,'search',{'q':'film'})
+        assert 55 < animepahe._cooldowns[base] - time.monotonic() <= 60
         with pytest.raises(ValueError,match='wait'): await animepahe.request(base,'play/abc')
         assert len(calls)==1
     finally:
@@ -128,6 +143,120 @@ def test_changed_api_endpoint_preserves_disabled_state_without_duplicates(tmp_pa
     sources=[(url,kind) for url,kind,_ in Discovery(store).manifests(active=False)]
     assert sources==[(second,'animepahe')]
     assert not Discovery(store).enabled(second)
+
+
+@pytest.mark.asyncio
+async def test_large_catalog_loads_at_most_two_pages_and_navigates_in_numeric_order(monkeypatch):
+    calls = []
+    async def fake_request(base, path, params=None):
+        page = params['page']; calls.append(page)
+        return {'paginationInfo':{'lastPage':125}, 'data':[{'episode':126-page, 'session':f'ep-{page}'}]}
+    monkeypatch.setattr(animepahe, 'request', fake_request)
+    movie = await animepahe.details('http://127.0.0.1/', {'id':'animepahe:abc', 'animepahe_session':'abc'})
+    assert calls == [1, 100] and movie['episodes_truncated']
+    assert movie['videos'][0]['episode'] == 26
+    middle = await animepahe.release_page('http://127.0.0.1/', movie, 99)
+    assert middle['videos'][0]['episode'] == 27 and calls == [1, 100, 99]
+    latest = await animepahe.release_page('http://127.0.0.1/', middle, 1)
+    assert latest['videos'][0]['episode'] == 125 and calls == [1, 100, 99]
+    episodes = []
+    for page in range(100, 0, -1):
+        selected = await animepahe.release_page('http://127.0.0.1/', movie, page)
+        episodes.extend(v['episode'] for v in ordered_episodes(selected))
+    assert episodes == list(range(26, 126))
+    with pytest.raises(ValueError): await animepahe.release_page('http://127.0.0.1/', movie, 101)
+
+
+@pytest.mark.asyncio
+async def test_episode_page_navigation_fetches_only_selected_page(tmp_path, monkeypatch):
+    store = Store(tmp_path/'db'); base = animepahe.register_default(store)
+    bot = Bot(store, tmp_path, 42, MagicMock()); bot.show_panel = AsyncMock()
+    movie = {'addon':base, 'id':'animepahe:abc', 'animepahe_session':'abc', 'name':'Example',
+             'animepahe_episodes':True, 'animepahe_release_page':3, 'animepahe_release_pages':3,
+             'animepahe_newest_videos':[{'id':'ep-3','season':1,'episode':3}],
+             'videos':[{'id':'ep-1','season':1,'episode':1}]}
+    await bot.series_menu(SimpleNamespace(), movie, season=1)
+    rows = bot.show_panel.await_args.kwargs['reply_markup'].inline_keyboard
+    later = next(b.callback_data for row in rows for b in row if b.text == 'Later episodes')
+    request = AsyncMock(return_value={'data':[{'session':'ep-2', 'episode':2}]})
+    monkeypatch.setattr(animepahe, 'request', request)
+    context = SimpleNamespace(bot=SimpleNamespace(send_message=AsyncMock(return_value=MagicMock(edit_text=AsyncMock()))))
+    await bot.series_callback(SimpleNamespace(callback_query=SimpleNamespace(data=later, message=MagicMock())), context)
+    await asyncio.gather(*bot.discovery_tasks)
+    assert request.await_count == 1 and request.await_args.args[2]['page'] == 2
+    rows = bot.show_panel.await_args.kwargs['reply_markup'].inline_keyboard
+    assert rows[0][0].text.startswith('Episode 02')
+
+
+@pytest.mark.asyncio
+async def test_requests_are_spaced_and_rate_limit_stops_queued_requests(monkeypatch):
+    calls = []
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self,*args): pass
+        def do_GET(self):
+            calls.append(time.monotonic())
+            if len(calls) == 2:
+                self.send_response(429); self.end_headers(); return
+            self.send_response(200); self.end_headers(); self.wfile.write(b'{"data":[]}')
+    server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True); thread.start()
+    base = f'http://127.0.0.1:{server.server_port}/'
+    monkeypatch.setattr(animepahe, 'REQUEST_INTERVAL', 0.1)
+    try:
+        results = await asyncio.gather(*(animepahe.request(base, 'search', {'q':str(i)}) for i in range(3)), return_exceptions=True)
+        assert len(calls) == 2 and calls[1] - calls[0] >= 0.07
+        assert isinstance(results[1], animepahe.RateLimitError)
+        assert isinstance(results[2], animepahe.RateLimitError)
+        assert animepahe._cooldowns[base] - time.monotonic() > 290
+        with pytest.raises(animepahe.RateLimitError): await animepahe.request(base, 'play/abc')
+        assert len(calls) == 2
+    finally:
+        await asyncio.to_thread(server.shutdown); server.server_close(); thread.join()
+
+
+@pytest.mark.asyncio
+async def test_repeated_search_and_release_requests_are_cached_but_play_is_not(api):
+    base, calls = api
+    first, second = await asyncio.gather(*(animepahe.request(base, 'search', {'q':'One Piece'}) for _ in range(2)))
+    assert len(calls) == 1 and first == second
+    first['data'].clear()
+    assert len((await animepahe.request(base, 'search', {'q':'One Piece'}))['data']) == 1
+    await animepahe.request(base, 'anime-123/releases', {'page':1, 'sort':'episode_desc'})
+    await animepahe.request(base, 'anime-123/releases', {'sort':'episode_desc', 'page':1})
+    assert len([call for call in calls if call[0].endswith('/releases')]) == 1
+    await animepahe.request(base, 'play/anime-123')
+    await animepahe.request(base, 'play/anime-123')
+    assert len([call for call in calls if call[0].startswith('/api/play/')]) == 2
+
+
+@pytest.mark.asyncio
+async def test_rate_limit_is_reported_to_search_user(tmp_path, monkeypatch):
+    store = Store(tmp_path/'db'); animepahe.register_default(store)
+    monkeypatch.setattr(animepahe, 'search', AsyncMock(side_effect=animepahe.RateLimitError('wait')))
+    bot = Bot(store, tmp_path, 42, MagicMock())
+    message = MagicMock(reply_text=AsyncMock(return_value=MagicMock(edit_text=AsyncMock())))
+    await bot.begin_search(message, 'One Piece')
+    await asyncio.gather(*bot.discovery_tasks)
+    assert 'rate limiting requests' in bot.panel().text
+
+
+@pytest.mark.asyncio
+async def test_expired_cache_is_refetched(api, monkeypatch):
+    base, calls = api
+    monkeypatch.setattr(animepahe, 'CACHE_SECONDS', 0)
+    await animepahe.request(base, 'search', {'q':'One Piece'})
+    await animepahe.request(base, 'search', {'q':'One Piece'})
+    assert len(calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_cache_is_bounded_and_evicted_search_is_refetched(api):
+    base, calls = api
+    for n in range(animepahe.MAX_CACHE_ENTRIES + 1):
+        await animepahe.request(base, 'search', {'q':str(n)})
+    assert len(animepahe._response_cache) == animepahe.MAX_CACHE_ENTRIES
+    await animepahe.request(base, 'search', {'q':'0'})
+    assert len(calls) == animepahe.MAX_CACHE_ENTRIES + 2
 
 
 @pytest.mark.asyncio

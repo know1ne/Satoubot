@@ -154,7 +154,19 @@ A running container does not guarantee successful searches. Upstream's cookie re
 
 <!-- /coderabbit-ai-generated:v1 -->
 
-Run the API in a separate isolated environment without mounting bot credentials or media. Its upstream scraper evaluates web page scripts and launches Chromium without its sandbox. Search results use AnimePahe's own title and episode IDs; the bot does not guess a match to a different catalogue. Episodes are listed in numeric order per AnimePahe title, up to 100 release pages. AnimePahe does not supply a consistent season number through this API, so the menu labels these entries as Episodes. Files still go through the normal link checks and approval flow. Source availability and any access restrictions depend on AnimePahe and its host. Live AnimePahe and Telegram transfers have not been verified.
+Run the API in a separate isolated environment without mounting bot credentials or media. Its upstream scraper evaluates web page scripts and launches Chromium without its sandbox. Search results use AnimePahe's own title and episode IDs; the bot does not guess a match to a different catalogue. <!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:c1b98641ea424ffb432c2035c11f5575b7143f608d195f306d04eb9e535c99b5 -->
+
+Episodes are listed in numeric order per AnimePahe title, up to 100 release pages. The bot loads two release pages at most initially and loads other pages only when you choose them. <!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:0062f87cd59a23f528cede796847f06d98f6d7837b06700512eefd2e919d1318 -->
+
+AnimePahe API requests are spaced at least three seconds apart within the bot process; successful search and release responses are cached for one minute. An HTTP 429 pauses requests for the Retry-After duration, or five minutes if unavailable.
+
+<!-- /coderabbit-ai-generated:v1 --> This reduces request bursts but cannot guarantee access: the site may rate limit the shared IP or other clients independently. Wait for an existing rate limit to expire before retrying.
+
+<!-- /coderabbit-ai-generated:v1 --> AnimePahe does not supply a consistent season number through this API, so the menu labels these entries as Episodes. Files still go through the normal link checks and approval flow. Source availability and any access restrictions depend on AnimePahe and its host. Live AnimePahe and Telegram transfers have not been verified.
 
 
 <!-- /coderabbit-ai-generated:v1 -->

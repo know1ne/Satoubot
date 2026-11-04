@@ -1,5 +1,6 @@
 """Adapter for a separately hosted AnimePahe API; no upstream code is executed here."""
 import asyncio
+import copy
 import ipaddress
 import json
 import re
@@ -14,6 +15,18 @@ from .public_transport import PublicTransport
 DEFAULT_API = 'http://127.0.0.1:3000/'
 NAME = 'AnimePahe (API)'
 _cooldowns = {}
+_request_locks = {}
+_next_requests = {}
+_response_cache = {}
+REQUEST_INTERVAL = 3.0
+DEFAULT_COOLDOWN = 300.0
+CACHE_SECONDS = 60.0
+MAX_CACHE_ENTRIES = 16
+
+
+class RateLimitError(ValueError):
+    """The API asked us to stop sending requests temporarily."""
+
 
 
 def normalize_base(value):
@@ -60,27 +73,44 @@ def _loopback(host):
 
 
 async def request(base, path, params=None):
-    remaining = _cooldowns.get(base, 0) - time.monotonic()
-    if remaining > 0: raise ValueError('AnimePahe API requested a wait before retrying')
-    transport = None if _loopback(httpx.URL(base).host) else PublicTransport()
-    async with httpx.AsyncClient(transport=transport, follow_redirects=False, trust_env=False, timeout=30) as client:
-        async with client.stream('GET', base + 'api/' + path, params=params) as response:
-            if response.status_code == 429:
-                retry = response.headers.get('retry-after', '')
-                try: delay = float(retry)
-                except ValueError:
-                    try: delay = (parsedate_to_datetime(retry) - datetime.now(timezone.utc)).total_seconds()
-                    except (TypeError, ValueError, OverflowError): delay = 60
-                _cooldowns[base] = time.monotonic() + max(0, delay)
-                raise ValueError('AnimePahe API rate limited the request')
-            response.raise_for_status()
-            data = bytearray()
-            async for chunk in response.aiter_bytes(chunk_size=8192):
-                data.extend(chunk)
-                if len(data) > 2_000_000: raise ValueError('AnimePahe response is too large')
-            result = json.loads(data)
-            if not isinstance(result, dict): raise ValueError('Invalid AnimePahe response')
-            return result
+    # One request per API at a time, with spacing across searches, releases and play.
+    lock = _request_locks.setdefault(base, asyncio.Lock())
+    async with lock:
+        if _cooldowns.get(base, 0) > time.monotonic():
+            raise RateLimitError('AnimePahe API requested a wait before retrying')
+        cacheable = path == 'search' or path.endswith('/releases')
+        cache_key = (base, path, tuple(sorted((str(k), str(v)) for k, v in (params or {}).items())))
+        cached = _response_cache.get(cache_key) if cacheable else None
+        if cached and cached[0] > time.monotonic():
+            return copy.deepcopy(cached[1])
+        delay = _next_requests.get(base, 0) - time.monotonic()
+        if delay > 0: await asyncio.sleep(delay)
+        if _cooldowns.get(base, 0) > time.monotonic():
+            raise RateLimitError('AnimePahe API requested a wait before retrying')
+        _next_requests[base] = time.monotonic() + REQUEST_INTERVAL
+        transport = None if _loopback(httpx.URL(base).host) else PublicTransport()
+        async with httpx.AsyncClient(transport=transport, follow_redirects=False, trust_env=False, timeout=30) as client:
+            async with client.stream('GET', base + 'api/' + path, params=params) as response:
+                if response.status_code == 429:
+                    retry = response.headers.get('retry-after', '')
+                    try: delay = float(retry)
+                    except ValueError:
+                        try: delay = (parsedate_to_datetime(retry) - datetime.now(timezone.utc)).total_seconds()
+                        except (TypeError, ValueError, OverflowError): delay = DEFAULT_COOLDOWN
+                    if not 0 < delay < float('inf'): delay = DEFAULT_COOLDOWN
+                    _cooldowns[base] = time.monotonic() + delay
+                    raise RateLimitError('AnimePahe API rate limited the request; wait before retrying')
+                response.raise_for_status()
+                data = bytearray()
+                async for chunk in response.aiter_bytes(chunk_size=8192):
+                    data.extend(chunk)
+                    if len(data) > 2_000_000: raise ValueError('AnimePahe response is too large')
+                result = json.loads(data)
+                if not isinstance(result, dict): raise ValueError('Invalid AnimePahe response')
+                if cacheable:
+                    if len(_response_cache) >= MAX_CACHE_ENTRIES: _response_cache.pop(next(iter(_response_cache)))
+                    _response_cache[cache_key] = (time.monotonic() + CACHE_SECONDS, copy.deepcopy(result))
+                return result
 
 
 async def search(base, query):
@@ -97,30 +127,48 @@ async def search(base, query):
     return movies
 
 
+def _release_videos(result):
+    videos = []
+    for item in result.get('data', []):
+        if not isinstance(item, dict): continue
+        try:
+            ep = int(item['episode']); ep_id = identifier(item['session'])
+            if ep <= 0 or str(ep) != str(item['episode']): continue
+        except (KeyError, ValueError, TypeError): continue
+        videos.append({'id':ep_id, 'season':1, 'episode':ep, 'title':item.get('title') or f'Episode {ep}'})
+    return videos
+
+
 async def details(base, movie):
     session = identifier(movie.get('animepahe_session'))
     path = quote(session, safe='') + '/releases'
     first = await request(base, path, {'sort':'episode_desc','page':1})
     info = first.get('paginationInfo') or {}
     try: total_pages = max(int(info.get('lastPage') or 1), 1)
-    except (TypeError, ValueError): total_pages = 1
+    except (TypeError, ValueError, OverflowError): total_pages = 1
     pages = min(total_pages, 100)
-    semaphore = asyncio.Semaphore(2)
-    async def page(n):
-        async with semaphore:
-            return await request(base, path, {'sort':'episode_desc','page':n})
-    results = [first]
-    if pages > 1: results.extend(await asyncio.gather(*(page(n) for n in range(2, pages+1))))
-    videos = []
-    for result in results:
-        for item in result.get('data', []):
-            if not isinstance(item, dict): continue
-            try:
-                ep = int(item['episode']); ep_id = identifier(item['session'])
-                if ep <= 0 or str(ep) != str(item['episode']): continue
-            except (KeyError, ValueError, TypeError): continue
-            videos.append({'id':ep_id, 'season':1, 'episode':ep, 'title':item.get('title') or f'Episode {ep}'})
-    return dict(movie, videos=videos, animepahe_episodes=True, episodes_truncated=total_pages > pages)
+    newest = _release_videos(first)
+    oldest = newest if pages == 1 else _release_videos(await request(base, path, {'sort':'episode_desc','page':pages}))
+    return dict(movie, videos=oldest, animepahe_episodes=True,
+                animepahe_release_page=pages, animepahe_release_pages=pages,
+                animepahe_newest_videos=newest, episodes_truncated=total_pages > pages)
+
+
+async def release_page(base, movie, page):
+    session = identifier(movie.get('animepahe_session'))
+    pages = movie.get('animepahe_release_pages')
+    if not isinstance(pages, int) or isinstance(pages, bool) or not 1 <= pages <= 100:
+        raise ValueError('Invalid release page count')
+    if not isinstance(page, int) or isinstance(page, bool) or not 1 <= page <= pages:
+        raise ValueError('Invalid release page')
+    if page == movie.get('animepahe_release_page'):
+        return movie
+    if page == 1 and isinstance(movie.get('animepahe_newest_videos'), list):
+        videos = movie['animepahe_newest_videos']
+    else:
+        result = await request(base, quote(session, safe='') + '/releases', {'sort':'episode_desc','page':page})
+        videos = _release_videos(result)
+    return dict(movie, videos=videos, animepahe_release_page=page)
 
 
 async def streams(base, movie):

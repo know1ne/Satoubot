@@ -233,7 +233,7 @@ class Bot(SourceHistoryFunctions, DailyFunctions, SeriesFunctions, InterfaceFunc
             if job:
                 await q.message.reply_text(job['source'], disable_web_page_preview=True)
             return
-        if q.data.startswith(('season:', 'seasons:')):
+        if q.data.startswith(('season:', 'seasons:', 'apage:')):
             return await self.series_callback(update, context)
         if q.data.startswith(('addonpage:', 'addonproviders:', 'addontoggle:')):
             return await self.addon_callback(update, context)
