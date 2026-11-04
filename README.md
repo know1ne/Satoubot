@@ -6,7 +6,30 @@
 
 # SatouBot
 
+<!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:32d899aa2ddc20edd225eb482fdfbbf05d4c4b99d7c75c30af95f3dbf39dc021 -->
+
+## Automatic startup with systemd (WSL)
+
+The Telegram local Bot API must already have a working `satoubot-api.service`; the installer retains its current settings and backs up any existing `satoubot.service` before replacing it. Verify that the API unit's working directory and credentials match your existing Telegram API setup. The bot unit uses this checkout and `.env` and waits up to 90 seconds for the configured `BOT_API_URL` TCP port. A listening port does not prove Telegram authentication or later API requests will succeed. The API dependency is for your local Telegram Bot API, not an external catalogue.
+
+After active downloads/uploads finish, stop any manually running SatouBot with Ctrl+C. In your bot checkout:
+
+```bash
+sudo bash scripts/install-systemd.sh
+sudo systemctl enable satoubot.service
+sudo systemctl restart satoubot.service
+systemctl is-active satoubot-api.service satoubot.service
+```
+
+`restart` starts the API dependency if needed. Verify both units are active and then send `/start` to the bot. The installer does not start or restart either service itself. Use `journalctl -u satoubot.service -n 50 --no-pager` and `journalctl -u satoubot-api.service -n 50 --no-pager` if startup fails. Review logs for secrets before sharing. Start one bot process for a token: once the service is running, do not separately start `python -m satoubot.app`.
+
+For WSL, systemd must be enabled in `/etc/wsl.conf` and the distro must be running. Enabling a systemd service starts it when the WSL distro starts; it does not itself start the distro on Windows login. Wait for active transfers before restarting the bot service.
+
 ## Local media and torrent downloads
+
+<!-- /coderabbit-ai-generated:v1 -->
 
 ### Install and update on WSL / Ubuntu
 
