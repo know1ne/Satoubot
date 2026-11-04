@@ -19,22 +19,24 @@ class TorrentFunctions:
         import shutil
         folder = self.torrent_folder() / secrets.token_hex(12)
         folder.mkdir(mode=0o700)
+        generation = self.panel().generation
         try:
             if magnet:
                 await self.show_panel(None, 'Fetching torrent metadata only… No content file has been approved.',
-                                      reply_markup=Markup([navigation()]), context=context)
+                                      reply_markup=Markup([navigation()]), context=context, remember=False)
+                generation = self.panel().generation
                 path, entries = await magnet_metadata(magnet, folder)
             else:
                 clean, entries, digest = inspect_torrent(data)
                 path = folder/(digest+'.torrent'); path.write_bytes(clean)
             key = self.store.cache('torrent', {'path':str(path), 'entries':entries, 'admin':self.admin_id})
-            await self.torrent_menu(context, key)
+            await self.torrent_menu(context, key, expected_generation=generation, remember=False)
         except asyncio.CancelledError:
             shutil.rmtree(folder, ignore_errors=True)
             raise
         except (TorrentError, OSError, TimeoutError) as exc:
             shutil.rmtree(folder, ignore_errors=True)
-            await self.show_panel(None, str(exc)[:500], reply_markup=Markup([navigation()]), context=context)
+            await self.show_panel(None, str(exc)[:500], reply_markup=Markup([navigation()]), context=context, expected_generation=generation)
 
     async def torrent_document(self, update, context):
         document = update.message.document
@@ -47,7 +49,7 @@ class TorrentFunctions:
         data = bytes(await remote.download_as_bytearray())
         await self.start_panel_task('torrent', 'Reading torrent metadata…', lambda: self.import_torrent(context, data=data), context)
 
-    async def torrent_menu(self, context, key, page=0):
+    async def torrent_menu(self, context, key, page=0, expected_generation=None, remember=True):
         value = self.store.cached(key, 'torrent')
         if not value or value.get('admin') != self.admin_id:
             return await self.show_panel(None, 'Torrent selection expired. Send it again.', context=context)
@@ -64,7 +66,7 @@ class TorrentFunctions:
         rows.append(navigation())
         await self.show_panel(None, f'Torrent files · Page {page+1}\nChoose one file to review before downloading.\n'
                               'Empty files and files over 10 GB cannot be selected.\nAudio/subtitle languages are unknown until the file is downloaded.\n'
-                              'Uses DHT and peer exchange; no continued seeding after completion.', reply_markup=Markup(rows), context=context)
+                              'Uses DHT and peer exchange; no continued seeding after completion.', reply_markup=Markup(rows), context=context, expected_generation=expected_generation, remember=remember)
 
     async def torrent_callback(self, update, context):
         parts = update.callback_query.data.split(':')
@@ -99,7 +101,7 @@ class TorrentFunctions:
         self.store.update(job_id, state='downloading')
         self.active_description = f'Torrent download #{job_id} · {entry["name"][-100:]}'
         self.spawn(self.perform_torrent(context, job_id, metadata, index))
-        await update.callback_query.edit_message_reply_markup(reply_markup=None)
+        await self.show_panel(update.callback_query.message, 'Torrent download started. Open Active transfers for progress.')
 
     async def perform_torrent(self, context, job_id, metadata, index):
         folder = self.media_dir/str(job_id)/'torrent'

@@ -19,23 +19,23 @@ class DownloadFunctions:
     async def handle_source(self, update, text):
         old = self.store.find_source(text)
         if old:
-            await update.message.reply_text(f'This link already has item #{old["id"]} ({old["state"]}).')
+            await self.show_panel(update.message, f'This link already has item #{old["id"]} ({old["state"]}).')
             return
         info=await probe(text)
         if info.get('hls_candidate'):
             try: plan = await inspect_hls(text)
             except HLSError as exc:
                 manual = self.store.cache('manual_link', {'url':text})
-                await update.message.reply_text(f'{exc}. Use the link manually.', reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('Give link', callback_data=f'directmanual:{manual}')], navigation()])); return
+                await self.show_panel(update.message, f'{exc}. Use the link manually.', reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('Give link', callback_data=f'directmanual:{manual}')], navigation()])); return
             except Exception:
                 manual = self.store.cache('manual_link', {'url':text})
-                await update.message.reply_text('Could not read the HLS playlist. Try again or use the link manually.', reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('Give link', callback_data=f'directmanual:{manual}')], navigation()])); return
+                await self.show_panel(update.message, 'Could not read the HLS playlist. Try again or use the link manually.', reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('Give link', callback_data=f'directmanual:{manual}')], navigation()])); return
             name = Path(filename_from_url(text)).stem + '.' + plan['format']
             job = self.store.create(text, Path(name).stem, name, 0)
             self.save_transfer_options(job)
             self.store.set_setting(f'job:{job}:hls', plan['format'])
             keyboard = InlineKeyboardMarkup([[InlineKeyboardButton('Transfer', callback_data=f'dl:{job}'), InlineKeyboardButton('Download only', callback_data=f'dllocal:{job}'), InlineKeyboardButton('Give link', callback_data=f'directlink:{job}'), InlineKeyboardButton('No', callback_data=f'skip:{job}')], navigation()])
-            await update.message.reply_text(f'Item #{job}\nName: {name}\nSize: unknown. Local download limit: 10 GB. Telegram upload available only at or below 2 GB.\nOutput: {FORMATS[self.transfer_options()["output_format"]]}\nAudio/subtitle tracks: not supplied; inspected after download.\nDownload this file?', reply_markup=keyboard)
+            await self.show_panel(update.message, f'Item #{job}\nName: {name}\nSize: unknown. Local download limit: 10 GB. Telegram upload available only at or below 2 GB.\nOutput: {FORMATS[self.transfer_options()["output_format"]]}\nAudio/subtitle tracks: not supplied; inspected after download.\nDownload this file?', reply_markup=keyboard)
             return
         if info.get('status') != 'ready' or not info.get('size'):
             reason=info.get('reason','Size unknown')
@@ -45,7 +45,7 @@ class DownloadFunctions:
             if info.get('status') == 'temporary':
                 key=self.store.cache('direct_retry', {'url':text})
                 keyboard=InlineKeyboardMarkup([[InlineKeyboardButton('Retry check', callback_data=f'directretry:{key}'), InlineKeyboardButton('Give link', callback_data=f'directmanual:{manual}')], navigation()])
-            await update.message.reply_text(f"{reason}." + (f" Retry after {retry}." if retry else ''), reply_markup=keyboard)
+            await self.show_panel(update.message, f"{reason}." + (f" Retry after {retry}." if retry else ''), reply_markup=keyboard)
             return
         size, content_type=info['size'],info.get('content_type','')
         if size > MAX_DOWNLOAD_BYTES:
@@ -53,10 +53,10 @@ class DownloadFunctions:
             job = self.store.create(text, Path(name).stem, name, size)
             self.store.update(job, state='oversize')
             buttons = InlineKeyboardMarkup([[InlineKeyboardButton('Report dead link', callback_data=f'report:{job}')]])
-            await update.message.reply_text(f'Saved large file #{job}: {name} ({size / 1_000_000:.1f} MB). Download it manually.\n{text}', reply_markup=buttons)
+            await self.show_panel(update.message, f'Saved large file #{job}: {name} ({size / 1_000_000:.1f} MB). Download it manually.\n{text}', reply_markup=buttons)
             return
         if content_type.lower().startswith('text/html'):
-            await update.message.reply_text('This appears to be a web page, not a direct file. Page link extraction is not yet supported.')
+            await self.show_panel(update.message, 'This appears to be a web page, not a direct file. Page link extraction is not yet supported.')
             return
         name = info.get('filename') or filename_from_url(text)
         tracks = 'Audio/subtitle tracks: unavailable before download.'
@@ -67,7 +67,7 @@ class DownloadFunctions:
         job = self.store.create(text, Path(name).stem, name, size)
         self.save_transfer_options(job)
         keyboard = InlineKeyboardMarkup([[InlineKeyboardButton('Transfer', callback_data=f'dl:{job}'), InlineKeyboardButton('Download only', callback_data=f'dllocal:{job}'), InlineKeyboardButton('Give link', callback_data=f'directlink:{job}'), InlineKeyboardButton('No', callback_data=f'skip:{job}')], navigation()])
-        await update.message.reply_text(f'Item #{job}\nName: {name}\nEstimated size: {size / 1_000_000:.1f} MB\n' + ('Above the 2 GB Telegram limit; this file will be saved locally.\n' if size > MAX_BYTES else '') + f'Output: {FORMATS[self.transfer_options()["output_format"]]}\n{tracks}\nDownload this file?', reply_markup=keyboard)
+        await self.show_panel(update.message, f'Item #{job}\nName: {name}\nEstimated size: {size / 1_000_000:.1f} MB\n' + ('Above the 2 GB Telegram limit; this file will be saved locally.\n' if size > MAX_BYTES else '') + f'Output: {FORMATS[self.transfer_options()["output_format"]]}\n{tracks}\nDownload this file?', reply_markup=keyboard)
 
 
     async def perform_download(self, context, job_id):

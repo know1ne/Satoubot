@@ -152,7 +152,7 @@ class Bot(PreferenceFunctions, TorrentFunctions, SourceHistoryFunctions, DailyFu
         cpu = psutil.cpu_percent(interval=None)
         target = self.store.setting('target', 'not selected')
         state = 'on' if self.transfers_enabled() else 'off'
-        await update.message.reply_text(f'Transfers: {state}\nDestination: {target}\nSystem CPU: {cpu:.1f}%\nBot memory: {memory:.1f} MiB\nActive transfers: {sum(not task.done() for task in self.tasks)}')
+        await self.show_panel(update.message, f'Transfers: {state}\nDestination: {target}\nSystem CPU: {cpu:.1f}%\nBot memory: {memory:.1f} MiB\nActive transfers: {sum(not task.done() for task in self.tasks)}')
 
     async def stop(self, update, context):
         if not self.authorized(update): return
@@ -199,7 +199,8 @@ class Bot(PreferenceFunctions, TorrentFunctions, SourceHistoryFunctions, DailyFu
         if text == 'Saved links': return await self.saved(update, context)
         if text == 'Group management': return await self.group_menu(update, context)
         if text == 'Migration': return await self.migration_menu(update, context)
-        if context.user_data.pop('manifest_pending', False):
+        is_manifest = text.startswith(('http://', 'https://')) and urlsplit(text).path.lower().endswith('/manifest.json')
+        if context.user_data.pop('manifest_pending', False) or is_manifest:
             try:
                 uploaded = context.user_data.pop('uploaded_manifest', None)
                 if uploaded is not None:
@@ -253,19 +254,20 @@ class Bot(PreferenceFunctions, TorrentFunctions, SourceHistoryFunctions, DailyFu
             self.store.update(job_id, state='converting', approval_token='')
             self.active_description = f'Converting #{job_id}'
             self.spawn(self.convert_job(context, job_id, selection, previous_state))
+            await self.show_panel(q.message, 'Conversion started. Open Active transfers for progress.')
             return
         if q.data.startswith('daily:'):
             return await self.daily_callback(update, context)
         if q.data.startswith('directmanual:'):
             try: entry = self.store.cached(int(q.data.split(':')[1]), 'manual_link')
             except ValueError: return
-            if entry: await q.message.reply_text(entry['url'], disable_web_page_preview=True)
+            if entry: await self.show_panel(q.message, entry['url'], disable_preview=True)
             return
         if q.data.startswith('directlink:'):
             try: job = self.store.get(int(q.data.split(':')[1]))
             except ValueError: return
             if job:
-                await q.message.reply_text(job['source'], disable_web_page_preview=True)
+                await self.show_panel(q.message, job['source'], disable_preview=True)
             return
         if q.data.startswith(('season:', 'seasons:')):
             return await self.series_callback(update, context)
@@ -306,15 +308,14 @@ class Bot(PreferenceFunctions, TorrentFunctions, SourceHistoryFunctions, DailyFu
             await q.message.reply_text(f'Send a photo for item #{job_id}. Use /pending to return to the preview.')
         elif action == 'skip' and job['state'] == 'ready':
             self.store.update(job_id,state='cancelled')
-            await q.edit_message_reply_markup(reply_markup=None)
-            await q.message.reply_text('Download cancelled.')
+            await self.show_panel(q.message, 'Download cancelled.')
         elif action in ('dl', 'dllocal') and job['state'] == 'ready':
             if not await self.transfer_gate(q.message): return
             if action == 'dllocal': self.store.set_setting(f'job:{job_id}:download_mode', 'local')
             self.active_description = f'Downloading #{job_id} · {job["filename"]}'
             self.store.update(job_id, state='downloading')
             self.spawn(self.perform_download(context, job_id))
-            await q.edit_message_reply_markup(reply_markup=None)
+            await self.show_panel(q.message, 'Download started. Open Active transfers for progress.')
         elif action == 'upload' and job['state'] == 'review':
             if job['size'] > MAX_BYTES:
                 await q.message.reply_text('This file exceeds the 2 GB Telegram upload limit and stays on your PC.'); return
@@ -346,7 +347,9 @@ class Bot(PreferenceFunctions, TorrentFunctions, SourceHistoryFunctions, DailyFu
             self.active_description = f'Uploading #{job_id} · {job["filename"]}'
             self.store.update(job_id, state='uploading', approval_token='')
             self.spawn(self.perform_upload(context, job_id))
-            await q.edit_message_reply_markup(reply_markup=None)
+            try: await q.edit_message_reply_markup(reply_markup=None)
+            except TelegramError: pass
+            await self.show_panel(None, 'Upload started. Open Active transfers for progress.', context=context)
         else:
             await q.message.reply_text('This action is no longer available.')
 

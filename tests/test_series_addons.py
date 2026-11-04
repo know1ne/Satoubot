@@ -106,8 +106,7 @@ async def test_addon_list_toggles_then_renders_and_has_explicit_import_button(tm
     update.callback_query = SimpleNamespace(message=message, data=rows[0][0].callback_data)
     await bot.addon_callback(update, context)
     assert not service.enabled('https://repo.test/manifest.json')
-    panel = bot.panel().message
-    assert panel.edit_text.await_args.kwargs['reply_markup'].inline_keyboard[0][0].text == 'OFF · Repository'
+    assert message.reply_text.await_args.kwargs['reply_markup'].inline_keyboard[0][0].text == 'OFF · Repository'
 
 
 @pytest.mark.asyncio

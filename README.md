@@ -173,13 +173,25 @@ Use **Start transfers** and **Stop transfers** to allow or block new downloads a
 
 <!-- coderabbit-ai-generated-section:v1:3ce28051ec55b804fb98cca91dbb9e63509c6827429e9172d68245dabe198c06 -->
 
-Menus reuse one temporary panel per admin. A new command or text message cancels that admin’s earlier temporary searches and file checks. Use `/stop` to cancel your current command or lookups; downloads and uploads continue. While navigating menus without issuing a new command, pending checks and transfer status appear on the current panel, and search results load there or appear as a Results button.
+<!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:f362dec3c7caa0fd73ba2a9a73d93311fa8cd60c1e7af945d1e1a2616d4f69bf -->
+
+Each command or menu navigation sends a fresh menu at the bottom of the chat and removes the preceding menu where Telegram permits. A new command or text message cancels that admin’s earlier temporary searches and file checks. Use `/stop` to cancel your current command or lookups; downloads and uploads continue. While navigating, pending checks and transfer status appear on the current menu, and search results load there or appear as a Results button. Background progress may update the current menu; download and upload progress messages are separate.
 
 <!-- /coderabbit-ai-generated:v1 -->
 
 <!-- /coderabbit-ai-generated:v1 -->
 
-<!-- /coderabbit-ai-generated:v1 --> Saved links are paginated, and Upload approvals opens a compact list before showing the selected preview. Back restores the previous screen and its input prompt. After five minutes without interaction (checked every 15 seconds), temporary menu messages are deleted; active work delays cleanup. Movie cards, file confirmations, selected-destination notices and transfer outcomes are preserved. Telegram deletion failures fall back to removing the menu buttons. Cleanup tracks messages created during the current bot process; it does not scan or delete your chat history. Use /start to reopen the menu.
+<!-- /coderabbit-ai-generated:v1 -->
+
+<!-- /coderabbit-ai-generated:v1 --> <!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:8b97c2928c19d25b4622281c5c2c13ece1a56ac627385af84906690977012118 -->
+
+Saved links are paginated, and Upload approvals opens a compact list before showing the selected preview. Back restores the previous screen and its input prompt, including a movie file list. After five minutes without interaction (checked every 15 seconds), temporary menu messages are deleted; active work delays cleanup. Transfer progress, upload reviews and outcomes remain separate. Telegram deletion failures fall back to removing the menu buttons. Cleanup tracks messages created during the current bot process; it does not scan or delete your chat history. Use /start to reopen the menu. A pasted manifest.json URL, or a manifest document with its original manifest URL in the caption, is saved as an add-on. A stream-only add-on still needs a searchable catalogue for movie names.
+
+<!-- /coderabbit-ai-generated:v1 -->
 
 Migration is available from the menu and /migration; copying channel/group messages still awaits the source and destination workflow. Group management remains a placeholder. My channels lists channels and groups owned by the logged-in user where the bot is an administrator.
 

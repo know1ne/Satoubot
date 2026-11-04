@@ -10,6 +10,9 @@ from telegram.error import BadRequest, TelegramError
 @dataclass
 class Panel:
     message: object = None
+    card: object = None
+    generation: int = 0
+    disable_preview: bool = False
     text: str = ''
     markup: object = None
     updated: float = field(default_factory=time.monotonic)
@@ -40,25 +43,46 @@ class InterfaceFunctions:
                 'search_pending', 'admin_add_pending', 'thumbnail_request')
         panel.prompt = {key: context.user_data[key] for key in keys if key in context.user_data}
 
-    async def show_panel(self, message, text, reply_markup=None, *, context=None, remember=True):
+    async def show_panel(self, message, text, reply_markup=None, *, context=None, remember=True, expected_generation=None, disable_preview=False):
         if reply_markup is None:
             from .menu import navigation
             reply_markup = Markup([navigation()])
         panel = self.panel()
         async with panel.lock:
-            if remember and panel.text and (panel.text, panel.markup) != (text, reply_markup):
-                panel.history.append((panel.text, panel.markup, panel.prompt.copy()))
+            if expected_generation is not None and panel.generation != expected_generation:
+                return False
+            if remember and panel.card is not None:
+                card = message if self.same_message(panel.card, message) else panel.card
+                photos = getattr(card, 'photo', None) or []
+                snapshot = {'card': True, 'photo': photos[-1].file_id if photos else None,
+                            'text': card.caption if photos else card.text}
+                panel.history.append((snapshot, card.reply_markup, panel.prompt.copy(), False))
                 panel.history = panel.history[-10:]
-            panel.text, panel.markup = text, reply_markup
-            await self._render_panel(panel, message, context)
+            elif remember and panel.text and (panel.text, panel.markup) != (text, reply_markup):
+                panel.history.append((panel.text, panel.markup, panel.prompt.copy(), panel.disable_preview))
+                panel.history = panel.history[-10:]
+            panel.text, panel.markup, panel.disable_preview = text, reply_markup, disable_preview
+            await self._render_panel(panel, message, context, fresh=True)
 
     async def panel_back(self, message, context):
         panel = self.panel()
         if not panel.history:
             return await self.main_menu(message)
-        text, markup, prompt = panel.history.pop()
+        text, markup, prompt, disable_preview = panel.history.pop()
         context.user_data.update(prompt)
-        await self.show_panel(message, text, markup, remember=False)
+        if isinstance(text, dict) and text.get('card'):
+            async with panel.lock:
+                if text['photo']:
+                    card = await context.bot.send_photo(self.admin_id, photo=text['photo'], caption=text['text'], reply_markup=markup)
+                else:
+                    card = await context.bot.send_message(self.admin_id, text['text'], reply_markup=markup)
+                old_message, old_card = panel.message, panel.card
+                panel.message, panel.card = None, card
+                panel.generation += 1
+                if old_message is not card: await self._retire_message(panel, old_message)
+                if old_card is not old_message and old_card is not card: await self._retire_message(panel, old_card)
+            return
+        await self.show_panel(message, text, markup, remember=False, disable_preview=disable_preview)
 
     async def panel_status(self, context, key, label=None):
         panel = self.panel()
@@ -73,7 +97,27 @@ class InterfaceFunctions:
                 except TelegramError:
                     pass
 
-    async def _render_panel(self, panel, message=None, context=None):
+    @staticmethod
+    def same_message(left, right):
+        if left is right: return left is not None
+        if left is None or right is None: return False
+        left_id, right_id = getattr(left, 'message_id', None), getattr(right, 'message_id', None)
+        left_chat, right_chat = getattr(left, 'chat_id', None), getattr(right, 'chat_id', None)
+        return (isinstance(left_id, int) and isinstance(right_id, int)
+                and isinstance(left_chat, int) and isinstance(right_chat, int)
+                and (left_chat, left_id) == (right_chat, right_id))
+
+    async def _retire_message(self, panel, message):
+        if message is None: return
+        try:
+            await message.delete()
+        except TelegramError:
+            try: await message.edit_reply_markup(reply_markup=None)
+            except TelegramError: pass
+            panel.retired.append(message)
+            panel.retired = panel.retired[-10:]
+
+    async def _render_panel(self, panel, message=None, context=None, fresh=False):
         text = panel.text
         if panel.pending:
             text += '\n\nIn progress:\n' + '\n'.join('• ' + value for value in panel.pending.values())
@@ -83,9 +127,10 @@ class InterfaceFunctions:
         if panel.pending and not any(b.callback_data == 'menu:main' for row in rows for b in row):
             rows.append([Button('Main menu', callback_data='menu:main')])
         markup = Markup(rows) if rows else None
-        if panel.message is not None:
+        preview_options = {'disable_web_page_preview': True} if panel.disable_preview else {}
+        if panel.message is not None and not fresh:
             try:
-                await panel.message.edit_text(text, reply_markup=markup)
+                await panel.message.edit_text(text, reply_markup=markup, **preview_options)
                 return
             except BadRequest as exc:
                 if 'message is not modified' in str(exc).lower():
@@ -95,10 +140,18 @@ class InterfaceFunctions:
                 pass
             panel.retired.append(panel.message)
             panel.message = None
+        previous = panel.message
+        card = panel.card
         if message is not None:
-            panel.message = await message.reply_text(text, reply_markup=markup)
+            new_message = await message.reply_text(text, reply_markup=markup, do_quote=False, **preview_options)
         elif context is not None:
-            panel.message = await context.bot.send_message(self.admin_id, text, reply_markup=markup)
+            new_message = await context.bot.send_message(self.admin_id, text, reply_markup=markup, **preview_options)
+        else:
+            return
+        panel.message, panel.card = new_message, None
+        if fresh: panel.generation += 1
+        if previous is not new_message: await self._retire_message(panel, previous)
+        if card is not previous and card is not new_message: await self._retire_message(panel, card)
 
     async def panel_task(self, key, factory, context):
         """Expose work beneath whichever menu is currently open, without blocking navigation."""
@@ -158,7 +211,7 @@ class InterfaceFunctions:
                 if now - panel.updated < 300 or panel.pending:
                     continue
                 remaining = []
-                for message in panel.retired + ([panel.message] if panel.message is not None else []):
+                for message in panel.retired + ([panel.message] if panel.message is not None else []) + ([panel.card] if panel.card is not None else []):
                     try:
                         await message.delete()
                     except TelegramError:
@@ -169,6 +222,8 @@ class InterfaceFunctions:
                             pass
                         remaining.append(message)
                 panel.message = None
+                panel.card = None
+                panel.generation += 1
                 panel.retired = remaining[-2:]
                 panel.text, panel.markup = '', None
                 panel.results.clear()

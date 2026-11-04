@@ -2,7 +2,8 @@ import asyncio
 import json
 import time
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlsplit
+import re
 
 from telegram import (InlineKeyboardButton as Button, InlineKeyboardMarkup as Markup,
                       InlineQueryResultArticle, InputTextMessageContent)
@@ -80,8 +81,14 @@ class CatalogueFunctions:
     async def manifest_document(self, update, context):
         if not self.authorized(update): return
         document = update.message.document
-        if not context.user_data.get('manifest_pending'):
-            await self.show_panel(update.message, 'Open Add-ons first to import a manifest file.')
+        caption = getattr(update.message, 'caption', None)
+        caption = caption if isinstance(caption, str) else ''
+        match = re.search(r'https?://[^\s<>]+', caption)
+        original_url = match.group(0).rstrip('.,)') if match else None
+        if original_url and not urlsplit(original_url).path.lower().endswith('/manifest.json'):
+            original_url = None
+        if not context.user_data.get('manifest_pending') and not original_url:
+            await self.show_panel(update.message, 'Open Add-ons first to import a manifest file, or send its manifest URL with the file.')
             return
         if not document.file_size or document.file_size > 1_000_000:
             await self.show_panel(update.message, 'Send a JSON manifest under 1 MB, or paste its URL.')
@@ -92,8 +99,14 @@ class CatalogueFunctions:
             if len(data) > 1_000_000: raise ValueError()
             manifest = json.loads(data)
             if not isinstance(manifest, dict): raise ValueError()
-            context.user_data['uploaded_manifest'] = manifest
-            await self.show_panel(update.message, 'Now send the original manifest URL or repository base URL. The bot needs it to resolve catalogue endpoints and plugin filenames.')
+            if original_url:
+                name, kind = Discovery(self.store).register(original_url, manifest)
+                context.user_data.pop('manifest_pending', None)
+                context.user_data.pop('uploaded_manifest', None)
+                await self.show_panel(update.message, f'Saved {name} ({kind}). Send a movie title to search.')
+            else:
+                context.user_data['uploaded_manifest'] = manifest
+                await self.show_panel(update.message, 'Now send the original manifest URL or repository base URL. The bot needs it to resolve catalogue endpoints and plugin filenames.')
         except Exception:
             await self.show_panel(update.message, 'Could not read this JSON manifest. Paste the original manifest URL instead.')
 
@@ -118,7 +131,7 @@ class CatalogueFunctions:
     async def begin_search(self, message, query):
         await self.cancel_panel_tasks()
         if not any(k == 'addon' for _, k, _ in Discovery(self.store).manifests()):
-            await message.reply_text('Add or enable a catalogue manifest using Add-ons first.')
+            await self.show_panel(message, 'Add or enable a catalogue manifest using Add-ons first.')
             return
         await self.show_panel(message, f'Searching for {query[:120]}…', reply_markup=Markup([navigation()]))
         await self.start_panel_task('search', f'Search: {query[:120]}', lambda: self.search_results(message, query), None)
@@ -174,6 +187,8 @@ class CatalogueFunctions:
         pending_render = None
         card = None
         card_is_photo = False
+        panel = self.panel()
+        generation = panel.generation
         last_update = 0.0
         artwork = movie.get('poster') or movie.get('background')
         metadata_url = movie.get('metadata_source') or movie.get('addon')
@@ -202,21 +217,31 @@ class CatalogueFunctions:
             if final and not source_ids:
                 caption += '\nNo links returned. Try again later.' if errors else '\nNo playable links returned. Try another source or movie.'
             markup = self.file_page(selection, source_ids, self.selection_pages.get(selection, 0))
-            if card is None:
-                try:
-                    if not artwork_task: raise ValueError()
-                    photo = await asyncio.wait_for(asyncio.shield(artwork_task), 2)
-                    card = await context.bot.send_photo(self.admin_id, photo=photo, caption=caption, reply_markup=markup)
-                    card_is_photo = True
-                except Exception:
-                    card = await context.bot.send_message(self.admin_id, caption + '\nImage unavailable.', reply_markup=markup)
-            else:
-                try:
-                    if card_is_photo: await card.edit_caption(caption=caption, reply_markup=markup)
-                    else: await card.edit_text(caption, reply_markup=markup)
-                except Exception:
-                    # A failed edit does not change file state or start a transfer.
-                    pass
+            async with panel.lock:
+                if panel.generation != generation:
+                    return
+                if card is None:
+                    try:
+                        if not artwork_task: raise ValueError()
+                        photo = await asyncio.wait_for(asyncio.shield(artwork_task), 2)
+                        card = await context.bot.send_photo(self.admin_id, photo=photo, caption=caption, reply_markup=markup)
+                        card_is_photo = True
+                    except Exception:
+                        card = await context.bot.send_message(self.admin_id, caption + '\nImage unavailable.', reply_markup=markup)
+                    previous, old_card = panel.message, panel.card
+                    panel.message, panel.card = None, card
+                    await self._retire_message(panel, previous)
+                    if old_card is not previous and old_card is not card:
+                        await self._retire_message(panel, old_card)
+                else:
+                    # Pagination may have replaced the card while providers were still loading.
+                    card = panel.card
+                    if card is None: return
+                    try:
+                        if card_is_photo: await card.edit_caption(caption=caption, reply_markup=markup)
+                        else: await card.edit_text(caption + '\nImage unavailable.', reply_markup=markup)
+                    except Exception:
+                        pass
             last_update = time.monotonic()
 
         async def flush():
@@ -329,15 +354,26 @@ class CatalogueFunctions:
                 await q.message.reply_text('Results expired or cancelled. Search again.'); return
             if not hasattr(self, 'selection_pages'): self.selection_pages = {}
             self.selection_pages[selection] = page
-            await q.edit_message_reply_markup(reply_markup=self.file_page(selection, ids, page))
+            panel = self.panel()
+            async with panel.lock:
+                if not self.same_message(panel.card, q.message):
+                    return
+                markup = self.file_page(selection, ids, page)
+                if q.message.photo:
+                    new_card = await context.bot.send_photo(self.admin_id, photo=q.message.photo[-1].file_id,
+                                                            caption=q.message.caption, reply_markup=markup)
+                else:
+                    new_card = await context.bot.send_message(self.admin_id, q.message.text, reply_markup=markup)
+                old = panel.card
+                panel.card = new_card
+                await self._retire_message(panel, old)
         elif action == 'cancelpage':
             getattr(self, 'selection_pages', {}).pop(key, None)
             self.store.db.execute("DELETE FROM discovery_cache WHERE id=? AND kind='pages'",(key,));self.store.db.commit()
-            await q.edit_message_reply_markup(reply_markup=None)
             await self.main_menu(q.message)
         elif action == 'link':
             stream = self.store.cached(key, 'confirmation')
-            if stream: await context.bot.send_message(self.admin_id, stream['url'], disable_web_page_preview=True)
+            if stream: await self.show_panel(q.message, stream['url'], disable_preview=True)
         elif action in ('yes', 'yeslocal', 'no'):
             stream = self.store.cached(key, 'confirmation')
             if not stream:
@@ -348,14 +384,15 @@ class CatalogueFunctions:
                 if action == 'yeslocal': stream.setdefault('transfer_options', {})['download_mode'] = 'local'
                 self.active_description = f'Checking {stream.get("filename") or stream["movie"]["name"]}'
                 self.spawn(self.download_choice(context, stream))
-            await q.edit_message_reply_markup(reply_markup=None)
-            if action == 'no': await q.message.reply_text('Download cancelled.')
+            await self.show_panel(q.message, 'Download cancelled.' if action == 'no' else 'Download started. Open Active transfers for progress.')
         elif action == 'movie':
+            await self.show_panel(q.message, 'Finding available files and checking sizes…')
             await self.start_panel_task('movie', 'Finding available files and checking sizes…', lambda: self.safe_movie_card(context, key), context)
         elif action in ('file','retryfile'):
             stream = self.store.cached(key, 'unchecked' if action == 'retryfile' else 'stream')
             if not stream:
                 await q.message.reply_text('File result expired. Use /search again.'); return
+            await self.show_panel(q.message, 'Checking the selected file…')
             await self.start_panel_task('file', f'Checking {stream.get("filename") or stream["movie"]["name"]}…', lambda: self.prepare_choice(context, stream), context)
 
     def file_page(self, selection, ids, page):
@@ -381,10 +418,11 @@ class CatalogueFunctions:
         if page: navigation.append(Button('Previous',callback_data=f'page:{selection*1000+page-1}'))
         if (page+1)*4<len(choices):navigation.append(Button('More',callback_data=f'page:{selection*1000+page+1}'))
         if navigation: rows.append(navigation)
-        rows.append([Button('Back', callback_data='searchagain'), Button('Cancel',callback_data=f'cancelpage:{selection}'), Button('Main menu', callback_data='menu:main')])
+        rows.append([Button('Back', callback_data='menu:back'), Button('Cancel',callback_data=f'cancelpage:{selection}'), Button('Main menu', callback_data='menu:main')])
         return Markup(rows)
 
     async def prepare_choice(self, context, stream):
+        generation = self.panel().generation
         try:
             if stream.get('torrent') or stream['url'].startswith('magnet:'):
                 return await self.import_torrent(context, magnet=stream['url'])
@@ -393,16 +431,19 @@ class CatalogueFunctions:
                 return
             stream = dict(stream, transfer_options=self.transfer_options())
             info=await probe(stream['url'],stream.get('headers'))
+            if self.panel().generation != generation: return
             state=info.get('status','ready')
             if state != 'ready' and info.get('hls_candidate'):
                 try: plan = await inspect_hls(stream['url'], stream.get('headers'), stream.get('quality'))
                 except HLSError as exc:
+                    if self.panel().generation != generation: return
                     await context.bot.send_message(self.admin_id, f'{exc}. You can use this link manually.\n{stream["url"]}', disable_web_page_preview=True); return
                 except Exception:
+                    if self.panel().generation != generation: return
                     await context.bot.send_message(self.admin_id, f'Could not check this HLS playlist. You can use the link manually.\n{stream["url"]}', disable_web_page_preview=True); return
                 stream = dict(stream, hls=True, hls_format=plan['format'], size=None, file_type=plan['format'])
                 key = self.store.cache('confirmation',stream)
-                await context.bot.send_message(self.admin_id, f"Download HLS?\nCatalogue: {clean_title(stream['movie'],stream)}\n{reported_tracks(stream)}\nOutput: {FORMATS[self.transfer_options()['output_format']]}\nSize: unknown; local limit 10 GB.\nTelegram upload is offered only if the finished file is at most 2 GB.", reply_markup=Markup([[Button('Transfer',callback_data=f'yes:{key}'),Button('Download only',callback_data=f'yeslocal:{key}'),Button('Give link',callback_data=f'link:{key}'),Button('No',callback_data=f'no:{key}')], navigation()])); return
+                await self.show_panel(None, f"Download HLS?\nCatalogue: {clean_title(stream['movie'],stream)}\n{reported_tracks(stream)}\nOutput: {FORMATS[self.transfer_options()['output_format']]}\nSize: unknown; local limit 10 GB.\nTelegram upload is offered only if the finished file is at most 2 GB.", reply_markup=Markup([[Button('Transfer',callback_data=f'yes:{key}'),Button('Download only',callback_data=f'yeslocal:{key}'),Button('Give link',callback_data=f'link:{key}'),Button('No',callback_data=f'no:{key}')], navigation()]), context=context, expected_generation=generation, remember=False); return
             if state != 'ready':
                 retry = info.get('retry_after')
                 hint = f' Retry after {retry}.' if retry else ''
@@ -430,8 +471,9 @@ class CatalogueFunctions:
                 track_text = 'File sample (may be incomplete):\n' + track_summary(metadata)
             except Exception:
                 pass
-            await context.bot.send_message(self.admin_id,f"Download this file?\nCatalogue: {clean_title(stream['movie'],stream)}\nActual file: {stream['filename']}\nSize: {size/1_000_000:.1f} MB\n{'Above 2 GB: local download only. ' if size > MAX_BYTES else ''}Format: {stream.get('file_type','unknown')}\nSource: {stream.get('provider','unknown')}\n{track_text}\nOutput: {FORMATS[self.transfer_options()['output_format']]}",reply_markup=Markup([[Button('Transfer',callback_data=f'yes:{key}'),Button('Download only',callback_data=f'yeslocal:{key}'),Button('Give link',callback_data=f'link:{key}'),Button('No',callback_data=f'no:{key}')], navigation()]))
+            await self.show_panel(None,f"Download this file?\nCatalogue: {clean_title(stream['movie'],stream)}\nActual file: {stream['filename']}\nSize: {size/1_000_000:.1f} MB\n{'Above 2 GB: local download only. ' if size > MAX_BYTES else ''}Format: {stream.get('file_type','unknown')}\nSource: {stream.get('provider','unknown')}\n{track_text}\nOutput: {FORMATS[self.transfer_options()['output_format']]}",reply_markup=Markup([[Button('Transfer',callback_data=f'yes:{key}'),Button('Download only',callback_data=f'yeslocal:{key}'),Button('Give link',callback_data=f'link:{key}'),Button('No',callback_data=f'no:{key}')], navigation()]), context=context, expected_generation=generation, remember=False)
         except Exception:
+            if self.panel().generation != generation: return
             await context.bot.send_message(self.admin_id,'Could not verify this source and its size. No download started. Try another link.')
 
     async def safe_movie_card(self, context, key):
