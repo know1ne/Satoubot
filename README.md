@@ -166,7 +166,13 @@ AnimePahe API requests are spaced at least three seconds apart within the bot pr
 
 <!-- /coderabbit-ai-generated:v1 --> This reduces request bursts but cannot guarantee access: the site may rate limit the shared IP or other clients independently. Wait for an existing rate limit to expire before retrying.
 
-<!-- /coderabbit-ai-generated:v1 --> AnimePahe does not supply a consistent season number through this API, so the menu labels these entries as Episodes. Files still go through the normal link checks and approval flow. Source availability and any access restrictions depend on AnimePahe and its host. Live AnimePahe and Telegram transfers have not been verified.
+<!-- /coderabbit-ai-generated:v1 --> AnimePahe does not supply a consistent season number through this API, so the menu labels these entries as Episodes. <!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:b02503472b6dfd409ddf958367b3ec34735a99e305b3c86ea5d8d32e75fdcf14 -->
+
+Direct media still goes through the normal link checks and approval flow. When the API returns only a provider web page for a quality, the bot shows it as Manual and does not treat it as a verified downloadable file.
+
+<!-- /coderabbit-ai-generated:v1 --> Source availability and any access restrictions depend on AnimePahe and its host. Live AnimePahe and Telegram transfers have not been verified.
 
 
 <!-- /coderabbit-ai-generated:v1 -->
@@ -340,7 +346,13 @@ Open **Add-ons** (or `/addons`) and send a Stremio catalogue manifest URL, or up
 
 <!-- coderabbit-ai-generated-section:v1:8619b6da6c26c4ffaea9d24c3732550a9255337a3f2ce19ac84fd333b501d1d2 -->
 
-4. Send a movie name or `/search Insidious`. Select the correct movie; the bot checks sources concurrently and shows checked files as they become available, with landscape artwork where available. Source lookup uses at most four concurrent providers, a 30-second per-provider timeout and a 90-second overall timeout. Add-ons on the same host are queried one at a time. Manifest and movie metadata responses are cached in memory for 60 seconds; file availability and access are still checked before downloads. A size labelled unknown is rechecked before download. Search alone never downloads or uploads media.
+4. Send a movie name or `/search Insidious`. Select the correct movie; the bot checks sources concurrently and shows checked files as they become available, with landscape artwork where available. <!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:9e3b091aa8baff5c9ac890ae34ed8e48e39a1d6d77e979bef7ef0390c8d5510a -->
+
+Source lookup uses at most four concurrent providers, a 30-second timeout for other providers, an 85-second timeout for AnimePahe, and a 90-second overall timeout.
+
+<!-- /coderabbit-ai-generated:v1 --> Add-ons on the same host are queried one at a time. Manifest and movie metadata responses are cached in memory for 60 seconds; file availability and access are still checked before downloads. A size labelled unknown is rechecked before download. Search alone never downloads or uploads media.
 
 <!-- /coderabbit-ai-generated:v1 -->
 5. <!-- coderabbit-ai-generated:v1 -->

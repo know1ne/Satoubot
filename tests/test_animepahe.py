@@ -250,6 +250,59 @@ async def test_expired_cache_is_refetched(api, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_unresolved_download_qualities_are_manual_pages_not_media(monkeypatch):
+    data = {'downloads':[
+        {'download':None, 'pahe':'https://download.test/480', 'quality':'SCY · 480p'},
+        {'download':None, 'pahe':'https://download.test/1080', 'quality':'SCY · 1080p'},
+        {'download':None, 'pahe':'http://127.0.0.1/private', 'quality':'unsafe'},
+        {'download':None, 'pahe':'https://user:password@download.test/path', 'quality':'unsafe'},
+    ], 'sources':[{'url':None, 'embed':'https://embed.test/e/abc', 'resolution':'1080'}]}
+    monkeypatch.setattr(animepahe, 'request', AsyncMock(return_value=data))
+    movie = {'animepahe_session':'title', 'video_id':'episode'}
+    results = await animepahe.streams('http://127.0.0.1:3000/', movie)
+    assert [v['quality'] for v in results] == ['SCY · 480p', 'SCY · 1080p', '1080']
+    assert all(v['manual_page'] for v in results)
+    assert all('password' not in v['url'] for v in results)
+
+
+@pytest.mark.asyncio
+async def test_manual_page_is_shown_without_probing_or_creating_transfer(tmp_path, monkeypatch):
+    bot = Bot(Store(tmp_path/'db'), tmp_path, 42, MagicMock())
+    probe = AsyncMock(side_effect=AssertionError('Manual pages must not be probed'))
+    monkeypatch.setattr('satoubot.catalogue.probe', probe)
+    context = SimpleNamespace(bot=SimpleNamespace(send_message=AsyncMock()))
+    await bot.prepare_choice(context, {'url':'https://download.test/480', 'manual_page':True,
+                                       'movie':{'name':'Example'}, 'quality':'480p'})
+    assert 'manually' in context.bot.send_message.await_args.args[1]
+    assert 'https://download.test/480' in context.bot.send_message.await_args.args[1]
+    probe.assert_not_awaited()
+    assert not bot.tasks
+
+
+@pytest.mark.asyncio
+async def test_manual_quality_options_reach_the_episode_card(tmp_path, monkeypatch):
+    store = Store(tmp_path/'db'); base = animepahe.register_default(store)
+    bot = Bot(store, tmp_path, 42, MagicMock())
+    movie = {'id':'animepahe:title', 'addon':base, 'animepahe_session':'title',
+             'name':'Example', 'type':'series', 'season':1, 'episode':1, 'video_id':'episode', 'animepahe_episodes':True}
+    key = store.cache('movie', movie)
+    monkeypatch.setattr(animepahe, 'request', AsyncMock(return_value={'downloads':[
+        {'download':None, 'pahe':'https://download.test/480', 'quality':'SCY · 480p'},
+        {'download':None, 'pahe':'https://download.test/1080', 'quality':'SCY · 1080p'},
+    ], 'sources':[]}))
+    monkeypatch.setattr('satoubot.catalogue.probe', AsyncMock(side_effect=AssertionError('Must not probe pages')))
+    store.set_setting('source_selection_explicit', '1')
+    card = MagicMock(edit_text=AsyncMock())
+    context = SimpleNamespace(bot=SimpleNamespace(send_message=AsyncMock(return_value=card)))
+    await bot.movie_card(context, key)
+    last = card.edit_text.await_args
+    assert 'Available options: 2' in last.args[0]
+    buttons = [b.text for row in last.kwargs['reply_markup'].inline_keyboard for b in row]
+    assert any('Manual SCY · 480p' in b for b in buttons)
+    assert any('Manual SCY · 1080p' in b for b in buttons)
+
+
+@pytest.mark.asyncio
 async def test_cache_is_bounded_and_evicted_search_is_refetched(api):
     base, calls = api
     for n in range(animepahe.MAX_CACHE_ENTRIES + 1):

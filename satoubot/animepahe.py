@@ -22,6 +22,7 @@ REQUEST_INTERVAL = 3.0
 DEFAULT_COOLDOWN = 300.0
 CACHE_SECONDS = 60.0
 MAX_CACHE_ENTRIES = 16
+PLAY_TIMEOUT = 75.0
 
 
 class RateLimitError(ValueError):
@@ -89,7 +90,8 @@ async def request(base, path, params=None):
             raise RateLimitError('AnimePahe API requested a wait before retrying')
         _next_requests[base] = time.monotonic() + REQUEST_INTERVAL
         transport = None if _loopback(httpx.URL(base).host) else PublicTransport()
-        async with httpx.AsyncClient(transport=transport, follow_redirects=False, trust_env=False, timeout=30) as client:
+        timeout = PLAY_TIMEOUT if path.startswith('play/') else 30
+        async with httpx.AsyncClient(transport=transport, follow_redirects=False, trust_env=False, timeout=timeout) as client:
             async with client.stream('GET', base + 'api/' + path, params=params) as response:
                 if response.status_code == 429:
                     retry = response.headers.get('retry-after', '')
@@ -182,12 +184,26 @@ async def streams(base, movie):
         for item in items[:50]:
             if not isinstance(item, dict): continue
             url = item.get(key)
-            if not isinstance(url, str) or not url.startswith(('https://','http://')) or url in seen: continue
+            manual = not isinstance(url, str) or not url.startswith(('https://','http://'))
+            if manual:
+                url = item.get('pahe') if group == 'downloads' else item.get('embed')
+                if not isinstance(url, str) or len(url) > 8192: continue
+                try:
+                    parsed = httpx.URL(url)
+                    if parsed.scheme != 'https' or not parsed.host or parsed.userinfo: continue
+                    host = parsed.host.lower().rstrip('.')
+                    if host == 'localhost' or host.endswith(('.localhost', '.local')): continue
+                    try:
+                        if not ipaddress.ip_address(host).is_global: continue
+                    except ValueError:
+                        if '.' not in host: continue
+                except (ValueError, httpx.InvalidURL): continue
+            if url in seen: continue
             seen.add(url)
             referer = item.get('downloadPage') if group == 'downloads' else item.get('embed')
             headers = {'Referer':referer} if isinstance(referer, str) and referer.startswith(('https://','http://')) else {}
-            label = str(item.get('resolution') or item.get('quality') or 'unknown')
+            label = str((item.get('quality') if manual else None) or item.get('resolution') or item.get('quality') or 'unknown')
             if item.get('isDub'): label += ' English dub'
             result.append({'url':url, 'quality':label, 'filename':item.get('filename'), 'headers':headers,
-                           'provider':'AnimePahe', 'source_manifest':base})
+                           'provider':'AnimePahe', 'source_manifest':base, 'manual_page':manual})
     return result

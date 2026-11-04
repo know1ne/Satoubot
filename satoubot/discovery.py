@@ -227,7 +227,7 @@ class Discovery:
         async def animepahe_query(url):
             from . import animepahe
             try:
-                async with asyncio.timeout(PROVIDER_TIMEOUT):
+                async with asyncio.timeout(85):
                     return await animepahe.streams(url, movie), None
             except Exception:
                 return [], 'AnimePahe (API)'

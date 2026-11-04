@@ -192,13 +192,15 @@ class CatalogueFunctions:
             if not cursor.rowcount: return
             qualities = ', '.join(dict.fromkeys(str(s.get('quality') or 'unspecified')[:35] for s in checked))[:250]
             episode_label = (' · Episode ' + str(movie['episode']) if movie.get('animepahe_episodes') else f' · S{movie["season"]:02d}E{movie["episode"]:02d}') if movie.get('season') is not None else ''
-            caption = f'{movie["name"][:150]}{episode_label}\nYear: {movie.get("year") or movie.get("releaseInfo") or "unknown"}\nQualities: {qualities or "none found"}\nAvailable files: {len(source_ids)}'
+            count_label = 'Available options' if any(s.get('manual_page') for s in checked) else 'Available files'
+            caption = f'{movie["name"][:150]}{episode_label}\nYear: {movie.get("year") or movie.get("releaseInfo") or "unknown"}\nQualities: {qualities or "none found"}\n{count_label}: {len(source_ids)}'
             caption += '\nDW: checked for download. Manual and Retry links follow. Select a file to review it.'
             if not final: caption += '\nSearching other providers…'
             if errors: caption += f'\n{len(errors)} source(s) failed or need configuration; search again to retry.'
             for error in dict.fromkeys(e for e in errors if e.startswith('Plugin runtime:')):
                 caption += '\n' + error
-            if final and not source_ids: caption += '\nNo playable links returned. Try another source or movie.'
+            if final and not source_ids:
+                caption += '\nNo links returned. Try again later.' if errors else '\nNo playable links returned. Try another source or movie.'
             markup = self.file_page(selection, source_ids, self.selection_pages.get(selection, 0))
             if card is None:
                 try:
@@ -231,7 +233,11 @@ class CatalogueFunctions:
                 headers = stream.get('headers') or {}
                 stream['headers'] = {str(k): str(v) for k,v in headers.items()} if isinstance(headers, dict) else {}
                 try:
-                    info = await asyncio.wait_for(probe(stream['url'], stream['headers']), 8)
+                    if stream.get('manual_page'):
+                        info = {'status':'manual', 'reason':'Provider page; open it to choose or download manually'}
+                        stream['file_type'] = 'page'
+                    else:
+                        info = await asyncio.wait_for(probe(stream['url'], stream['headers']), 8)
                     stream['check_status'] = info.get('status','ready')
                     stream['check_reason'] = info.get('reason','')
                     stream['retry_after'] = info.get('retry_after')
@@ -381,6 +387,9 @@ class CatalogueFunctions:
 
     async def prepare_choice(self, context, stream):
         try:
+            if stream.get('manual_page'):
+                await context.bot.send_message(self.admin_id, f"Provider page; open it to choose or download manually.\n{stream['url']}", disable_web_page_preview=True)
+                return
             info=await probe(stream['url'],stream.get('headers'))
             state=info.get('status','ready')
             if state != 'ready' and info.get('hls_candidate'):
