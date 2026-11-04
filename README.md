@@ -401,7 +401,17 @@ Open **Add-ons** (or `/addons`) and send a Stremio catalogue manifest URL, or up
 
 <!-- coderabbit-ai-generated-section:v1:9304663bb092ebef8e613278569cac528f89457713a3cc82df6e257804713427 -->
 
-3. If desired, explicitly add your Nuvio repository URL in the same menu. Only saved manifests are queried. Manifests persist in the local database. Provider scripts are fetched when looking up streams.
+<!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:63872f37b5f04c82a83d0dc2915f90f70026d19198608378b288555ca496923b -->
+
+3. **Add-ons** offers two built-in choices: **Add Yoru providers** and **Add HDHub**. Select one to save it; no preset is installed automatically. Add any other Stremio or Nuvio manifest yourself. Use each ON/OFF row and, for a provider repository, **Providers** to manage individual providers. Your individual choice persists, including when a provider was disabled by default in the manifest. Turning the repository OFF pauses all its providers while retaining their individual choices. Switches apply to new lookups.
+
+The status icon is separate from ON/OFF: 🟢 means the manifest was reachable; 🔴 reports an unavailable or invalid manifest, a failed search/file lookup, or no results from the last lookup; ⚪ means OFF or not yet checked. A source can return no results for one title while working for another. The row explains the reason; a stream-only add-on also says it has no title search. Manifest reachability does not verify every provider or media link. Status reports expire after 15 minutes, so old results return to unverified. Opening Add-ons checks enabled visible manifests in the background (at most four at a time, with an eight-second limit each). OFF sources are not checked automatically; **Check** or **Check manifests on this page** can check them explicitly without switching them ON. **Refresh manifest** checks and updates that saved manifest while preserving your ON/OFF choices; a failed refresh retains the previous configuration. An add-on may still need its own setup or be temporarily blocked.
+
+Only saved manifests are queried for searches. Manifests and switch choices persist in the local database. Provider scripts are fetched when looking up streams.
+
+<!-- /coderabbit-ai-generated:v1 -->
 
 <!-- /coderabbit-ai-generated:v1 -->
 <!-- coderabbit-ai-generated:v1 -->

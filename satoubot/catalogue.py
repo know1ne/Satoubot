@@ -10,7 +10,8 @@ from telegram import (InlineKeyboardButton as Button, InlineKeyboardMarkup as Ma
 from .menu import navigation
 from .artwork import landscape
 from .media import reported_tracks, FORMATS, inspect_remote_media, track_summary
-from .discovery import Discovery
+from .discovery import Discovery, PRESETS
+from .addon_health import get_status, set_status, label
 from .transfer import MAX_BYTES, MAX_DOWNLOAD_BYTES, inspect_url, safe_name
 from .file_info import probe, clean_title
 from .source_history import record_check, reliability
@@ -18,56 +19,152 @@ from .hls import inspect_hls, HLSError
 
 
 class CatalogueFunctions:
-    async def addons(self, update, context, page=0, repository=None):
+    async def addons(self, update, context, page=0, repository=None, *, expected_generation=None, update_in_place=False):
         if not self.authorized(update): return
         context.user_data.pop('manifest_pending', None)
         service = Discovery(self.store)
+        manifests = service.manifests(active=False)
         entries = []
-        for url, kind, manifest in service.manifests(active=False):
+        for url, kind, manifest in manifests:
             if repository and url != repository: continue
             if repository:
                 for scraper in manifest.get('scrapers', []):
+                    if not isinstance(scraper, dict): continue
                     filename = scraper.get('filename')
                     if not filename: continue
-                    active = service.enabled(url) and scraper.get('enabled', True) and service.enabled(url, filename)
-                    entries.append((scraper.get('name', filename), active, url, filename))
+                    entries.append((scraper.get('name', filename), url, filename))
             else:
-                entries.append((manifest.get('name', 'Add-on'), service.enabled(url), url, None))
+                entries.append((manifest.get('name', 'Add-on'), url, None))
         page = max(0, min(page, max(0, (len(entries)-1)//8)))
         rows = []
-        for name, active, url, provider in entries[page*8:page*8+8]:
+        for name, url, provider in entries[page*8:page*8+8]:
+            active = service.enabled(url, provider)
+            parent = service.enabled(url) if provider else True
+            icon, mode, status = label(self.store, url, provider, active=active, parent_active=parent)
+            if not provider:
+                source = next(((kind, manifest) for item_url, kind, manifest in manifests if item_url == url), None)
+                if source and source[0] == 'addon' and not any(
+                    isinstance(c, dict) and any(isinstance(e, dict) and e.get('name') == 'search' for e in (c.get('extra') or []))
+                    for c in source[1].get('catalogs', []) if isinstance(c, dict)):
+                    status += '; no title search'
             key = self.store.cache('addon_control', {'url':url, 'provider':provider, 'repository':repository, 'page':page})
-            rows.append([Button(('ON · ' if active else 'OFF · ') + str(name)[:70], callback_data=f'addontoggle:{key}')])
-            if not repository and any(u == url and k == 'providers' for u, k, _ in service.manifests(active=False)):
-                rows.append([Button('Choose individual providers', callback_data=f'addonproviders:{key}:0')])
-        key = self.store.cache('addon_control', {'repository':repository})
+            rows.append([Button(f'{icon} {mode} · {str(name)[:40]} · {status}'[:120], callback_data=f'addontoggle:{key}')])
+            if not repository:
+                controls = [Button('Check', callback_data=f'addoncheck:{key}'),
+                            Button('Refresh manifest', callback_data=f'addonrefresh:{key}')]
+                if any(u == url and k == 'providers' for u, k, _ in manifests):
+                    controls.append(Button('Providers', callback_data=f'addonproviders:{key}:0'))
+                rows.append(controls)
+        key = self.store.cache('addon_control', {'repository':repository, 'page':page})
         paging = []
         if page: paging.append(Button('Previous', callback_data=f'addonpage:{key}:{page-1}'))
         if (page+1)*8 < len(entries): paging.append(Button('More', callback_data=f'addonpage:{key}:{page+1}'))
         if paging: rows.append(paging)
-        if not repository: rows.append([Button('Catalogues / artwork sources', callback_data='menu:catalogues')])
+        if not repository:
+            saved = {url for url, _, _ in manifests}
+            preset_buttons = []
+            for preset, (name, url) in PRESETS.items():
+                if url in saved: continue
+                state = get_status(self.store, url, 'manifest')
+                prefix = '🔴 ' if state in ('error', 'invalid') else ''
+                preset_buttons.append(Button(f'{prefix}Add {name}', callback_data=f'addonpreset:{preset}'))
+            if preset_buttons: rows.append(preset_buttons)
+            if entries: rows.append([Button('Check manifests on this page', callback_data=f'addoncheckall:{key}')])
+            rows.append([Button('Catalogues / artwork sources', callback_data='menu:catalogues')])
         rows.append([Button('Add manifest', callback_data='menu:addmanifest')])
         rows.append(navigation())
         title = 'Providers' if repository else 'Add-ons'
-        text = f'{title} · Page {page+1}\nTap to turn ON/OFF. Changes apply to new lookups.'
-        if repository and not service.enabled(repository): text += '\nThe repository is OFF; enable it in Add-ons to use these providers.'
-        if not entries: text += '\nNo sources saved. Add a manifest to get started.'
-        await self.show_panel(update.message, text, reply_markup=Markup(rows))
+        text = (f'{title} · Page {page+1}\nTap a source to switch it ON/OFF. Changes apply to new lookups.\n'
+                '🟢 manifest reachable · 🔴 last check or lookup failed / returned no results · ⚪ not checked or OFF.\n'
+                'Checks expire after 15 minutes. No results can mean this title is unavailable, not that the source is down.')
+        if repository and not service.enabled(repository): text += '\nRepository is OFF; provider choices apply after it is turned on.'
+        if not entries: text += '\nNo sources saved. Add a preset or manifest.'
+        markup = Markup(rows)
+        if update_in_place:
+            panel = self.panel()
+            async with panel.lock:
+                if panel.generation != expected_generation or panel.message is None: return
+                panel.text, panel.markup = text, markup
+                await self._render_panel(panel, message=update.message)
+            return
+        shown = await self.show_panel(update.message, text, reply_markup=markup, expected_generation=expected_generation)
+        if shown is False or repository: return
+        # A bounded background probe checks only enabled, stale visible manifests.
+        inflight = getattr(self, '_addon_health_inflight', None)
+        if inflight is None: inflight = self._addon_health_inflight = set()
+        urls = [url for _, url, provider in entries[page*8:page*8+8]
+                if not provider and service.enabled(url) and get_status(self.store, url, 'manifest') == 'unknown' and url not in inflight]
+        if not urls: return
+        inflight.update(urls)
+        async def auto_check():
+            semaphore = asyncio.Semaphore(4)
+            async def one(url):
+                async with semaphore:
+                    if service.enabled(url): await service.check_manifest(url)
+            try:
+                await asyncio.gather(*(one(url) for url in urls))
+                panel = self.panel()
+                # A toggle can redraw this same list while checks are running.
+                # Update that newer list, but never replace a different screen.
+                if panel.text.startswith(f'Add-ons · Page {page+1}\n'):
+                    await self.addons(update, context, page, repository, expected_generation=panel.generation, update_in_place=True)
+            finally:
+                inflight.difference_update(urls)
+        self.launch_discovery(auto_check())
 
     async def addon_callback(self, update, context):
         from types import SimpleNamespace
         parts = update.callback_query.data.split(':')
+        action = parts[0]
+        message = update.callback_query.message
+        if action == 'addonpreset':
+            preset = PRESETS.get(parts[1]) if len(parts) == 2 else None
+            if not preset: return
+            name, url = preset
+            if any(u == url for u, _, _ in Discovery(self.store).manifests(active=False)):
+                proxy = SimpleNamespace(message=message, effective_user=update.effective_user, effective_chat=update.effective_chat)
+                return await self.addons(proxy, context)
+            await self.show_panel(message, f'Adding {name}…')
+            generation = self.panel().generation
+            async def add_preset():
+                try:
+                    await asyncio.wait_for(Discovery(self.store).add(url), 10)
+                    result = f'Saved {name}. Open Add-ons to turn sources ON/OFF.'
+                except Exception:
+                    if get_status(self.store, url, 'manifest') == 'unknown': set_status(self.store, url, 'manifest', 'error')
+                    result = f'🔴 Could not load {name}. Open Add-ons and retry when it is reachable.'
+                await self.show_panel(None, result, context=context, expected_generation=generation, remember=False)
+            return await self.start_panel_task('addon_check', f'Adding {name}', add_preset, context)
         try: control = self.store.cached(int(parts[1]), 'addon_control')
         except (ValueError, IndexError): return
-        if not control: return await self.show_panel(update.callback_query.message, 'This add-on list expired. Open Add-ons again.')
+        if not control: return await self.show_panel(message, 'This add-on list expired. Open Add-ons again.')
         repository, page = control.get('repository'), control.get('page', 0)
-        if parts[0] == 'addontoggle':
-            Discovery(self.store).toggle(control['url'], control.get('provider'))
+        service = Discovery(self.store)
+        if action in ('addoncheck', 'addonrefresh', 'addoncheckall'):
+            urls = [control['url']] if action != 'addoncheckall' else [url for url, _, _ in service.manifests(active=False)][page*8:page*8+8]
+            if not urls: return
+            await self.show_panel(message, 'Checking saved manifests…')
+            generation = self.panel().generation
+            proxy = SimpleNamespace(message=message, effective_user=update.effective_user, effective_chat=update.effective_chat)
+            async def check():
+                semaphore = asyncio.Semaphore(4)
+                async def one(url):
+                    async with semaphore: await service.check_manifest(url, refresh=action == 'addonrefresh')
+                await asyncio.gather(*(one(url) for url in dict.fromkeys(urls)))
+                await self.addons(proxy, context, page, repository, expected_generation=generation)
+            return await self.start_panel_task('addon_check', 'Checking manifests', check, context)
+        if action == 'addontoggle':
+            # Ignore stale controls for removed repositories or providers.
+            found = next(((kind, manifest) for url, kind, manifest in service.manifests(active=False) if url == control['url']), None)
+            if not found: return await self.show_panel(message, 'This add-on no longer exists.')
+            if control.get('provider') and not any(isinstance(p, dict) and p.get('filename') == control['provider'] for p in found[1].get('scrapers', [])):
+                return await self.show_panel(message, 'This provider is no longer in the repository.')
+            service.toggle(control['url'], control.get('provider'))
         else:
             try: page = int(parts[2])
             except (ValueError, IndexError): return
-            if parts[0] == 'addonproviders': repository = control['url']
-        proxy = SimpleNamespace(message=update.callback_query.message, effective_user=update.effective_user, effective_chat=update.effective_chat)
+            if action == 'addonproviders': repository = control['url']
+        proxy = SimpleNamespace(message=message, effective_user=update.effective_user, effective_chat=update.effective_chat)
         await self.addons(proxy, context, page, repository)
 
     async def add_manifest_prompt(self, update, context):

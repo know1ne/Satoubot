@@ -271,7 +271,7 @@ class Bot(PreferenceFunctions, TorrentFunctions, SourceHistoryFunctions, DailyFu
             return
         if q.data.startswith(('season:', 'seasons:')):
             return await self.series_callback(update, context)
-        if q.data.startswith(('addonpage:', 'addonproviders:', 'addontoggle:')):
+        if q.data.startswith(('addonpage:', 'addonproviders:', 'addontoggle:', 'addonpreset:', 'addoncheck:', 'addonrefresh:', 'addoncheckall:')):
             return await self.addon_callback(update, context)
         if q.data.startswith('directretry:'):
             try: source=self.store.cached(int(q.data.split(':')[1]), 'direct_retry')
