@@ -1,6 +1,50 @@
 <!-- coderabbit-ai-generated:v1 -->
 
+<!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:7b7b730121a5c424183b9b660d9c9e6aee8232df3ef390de029e51b0531709f1 -->
+
 # SatouBot
+
+## Local media and torrent downloads
+
+### Install and update on WSL / Ubuntu
+
+After active downloads/uploads finish, stop the manually running bot with Ctrl+C, then:
+
+```bash
+cd ~/Satoubot-clean
+git pull --ff-only origin coderabbit/fix-animepahe-cookie-refresh/4d4b1461
+sudo apt-get update
+sudo apt-get install -y ffmpeg aria2
+source .venv/bin/activate
+python -m satoubot.app
+```
+
+Continue running your existing Telegram local Bot API service (`satoubot-api.service`) when `BOT_API_URL` points to it. The removed browser API, Brave debugger, Docker containers for that API, and WSL socat relay are no longer used by SatouBot. Its old `.env` API setting is ignored. Do not run both a manual bot process and `satoubot.service` for the same token. Existing Python requirements are unchanged.
+
+### Settings and file review
+
+Open **Settings** (or `/settings`) to save an output format and delivery mode for your admin account in the existing local SQLite database. Changes affect new selections. Choose **Original**, **MKV (keep codecs)**, **MP4 (keep codecs)**, or **MP4 (H.264/AAC)**. Remuxing changes the container without re-encoding. H.264/AAC MP4 re-encodes video/audio and converts compatible text subtitles. Some codecs, image subtitles, attachments, and data tracks cannot go into every container; failed conversions retain the original and report the failure. Arbitrary FFmpeg arguments are not accepted.
+
+Choose a file from your catalogues or send an HTTP(S) file URL. The confirmation shows the source, format, output choice, and audio/subtitle information. Direct media track checks read at most 8 MiB in bounded public HTTP ranges into a local sample; FFprobe never opens a remote URL. Samples can be incomplete, and some providers do not expose tracks until the full file is downloaded. Add-on language/subtitle declarations are labelled as reported metadata. External subtitle links are listed as declarations and are not automatically fetched or embedded.
+
+HLS downloads still support finite, unencrypted TS/fMP4 playlists with embedded audio. Set output to **MKV** to remux the downloaded TS file into MKV. Separate audio/subtitle playlists, DRM, live streams, byte ranges, and discontinuities remain unsupported; no protection is bypassed. Completed local files are inspected again for embedded audio/subtitle languages and codecs.
+
+Choose **Download only** to retain the file on this server. The **Transfer** button uses the saved delivery default; **Download only** overrides it for that selection. Files at or below 2 GB can later enter Telegram review from **Saved files / links → Review Telegram upload**. **Convert format** is available from local files and upload review. The original is retained when producing a converted file. Existing output files are never overwritten. A fresh preview and individual approval are required for every Telegram upload. Files above 2 GB remain local; downloads/conversions are limited to 10 GB. Conversion can need space for both original and output.
+
+### Torrent files
+
+Send a magnet link, a public HTTP(S) `.torrent` URL, or a `.torrent` document under 4 MB. Compatible add-on `infoHash`/magnet results also open torrent selection. Magnets fetch metadata first. Choose one file in the paginated list, then explicitly choose **Download only** or **Download → review upload**. No content download starts until that confirmation; empty files and files above 10 GB cannot be selected. Torrent metadata normally has filenames/sizes, not verified language tracks; embedded tracks are inspected after completion.
+
+The aria2 process is owned by the current task and uses DHT/peer exchange for public v1/hybrid torrents (piece size up to 16 MiB). Trackers, web seeds, external metadata URLs, and private tracker credentials are discarded. Private torrents and v2-only torrents are unsupported. Availability depends on reachable peers and WSL/network configuration. Torrent mode intentionally opens peer-to-peer networking; the HTTP downloader retains its separate public-destination checks. Normal BitTorrent piece sharing can occur during download, capped at 64 KiB/s; continued seeding is disabled after completion. No RPC server is exposed. Selecting one file can also require adjacent pieces from another file; the task disk limit includes a bounded allowance for those pieces. Status reports approximate disk bytes written. Cancellation terminates that aria2 process and removes incomplete content for that task.
+
+**Back**, **Cancel**, and **Main menu** remain available. **Cancel** and `/stop` cancel temporary lookups/metadata work; transfers continue. Use **Active transfers → Cancel transfer** to cancel an actual download, conversion, or upload. Settings remain local; Telegram is the only upload destination.
+
+The implementation was informed by the settings, selection and local-download flows in [mirror-leech-telegram-bot](https://github.com/anasty17/mirror-leech-telegram-bot). It uses SatouBot's existing modules and approval model. Existing group, daily-upload and migration features are retained; no new external upload service or catalogue was added.
+
+
+<!-- /coderabbit-ai-generated:v1 -->
 
 Early foundation for a private Telegram media administrator. This is not yet the complete bot.
 
@@ -38,7 +82,13 @@ The owner and authorized admins can send an HTTP(S) media URL or choose a search
 
 <!-- coderabbit-ai-generated-section:v1:750b9412dc59dc775f8a57371e759409a669f0bb65f5e7f9018457286e871327 -->
 
-A download uses up to four HTTP byte-range connections when the server advertises range support and provides a stable validator. No aria2 integration or transcoding is used; the verified filename supplies the displayed format, and ffprobe is not required.
+<!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:8bfb7e462b9443addf43cb5b3b1aceeae36f671987ea77f720a8a0ca2ff51638 -->
+
+A direct HTTP download uses up to four verified byte-range connections when the source supports them. Torrent downloads use aria2. FFmpeg/FFprobe inspect local media and apply your selected output format; see **Local media and torrent downloads** below.
+
+<!-- /coderabbit-ai-generated:v1 -->
 
 Supported HLS downloads accept finite, unencrypted MPEG-TS and fragmented MP4 playlists, including master playlists with embedded audio. Choose **Transfer** after reviewing the unknown size and 10 GB local limit, or **Give link** to use the original playlist in VLC or another app. The bot checks each destination and redirect, downloads segments without transcoding, and removes partial files if the download fails or exceeds the limit. Live, encrypted, byte-range and separate audio/subtitle playlists need manual handling. A completed file above 2 GB remains on the PC; smaller files enter the normal upload review. HLS with unknown size is excluded from Daily Uploads.
 
@@ -134,52 +184,17 @@ Stream add-ons receive the catalogue episode ID only when their manifest resourc
 
 The bot gets IDs from your enabled catalogues and requires no IMDb or TMDB API key. If the selected metadata lacks a TMDB ID, it checks compatible enabled metadata add-ons for the same title ID. If none supplies a TMDB ID, plugins that require one cannot fetch that title; stream add-ons can still return results using the catalogue ID. The bot does not guess identities from similar titles.
 
-### AnimePahe add-on
+<!-- coderabbit-ai-generated:v1 -->
 
-AnimePahe appears enabled in **Add-ons** by default, with a switch to disable it. SatouBot connects to a separately running [AnimePahe API](https://github.com/ElijahCodes12345/animepahe-api/blob/main/readme.md), defaulting to `http://127.0.0.1:3000/`. Set `ANIMEPAHE_API_URL` in `.env` if your API uses a different address, and restart SatouBot. The upstream author requires users to host their own API; SatouBot does not install or start it. <!-- coderabbit-ai-generated:v1 -->
+<!-- coderabbit-ai-generated-section:v1:1f397e57e3eb26837769c17e997ff8ac2d8b77b1a2fe8dbe75fe4977f3aa7e4c -->
 
-<!-- coderabbit-ai-generated-section:v1:b33bfb0bcafa74d697dd396209f8eb334727fe2905b80d1aec28f08ff8e42b6c -->
+### Add-on sources
 
-If it is unavailable, other catalogues can still return results and the search reports an AnimePahe source failure. No Stremio manifest is required for AnimePahe; enable its switch in **Add-ons**, then use `/search One Piece`.
-
-If the API returns HTTP 503 with `Failed to refresh cookies`, the bot has reached the API, but the API could not establish a session with the upstream site. Check this independently of Telegram:
-
-```bash
-curl -sS --max-time 60 --get --data-urlencode 'q=One Piece' \
-  -w '\nHTTP %{http_code}\n' http://127.0.0.1:3000/api/search
-docker logs --tail 50 satoubot-animepahe
-```
-
-A running container does not guarantee successful searches. Upstream's cookie refresh waits for `networkidle` and requires a nonempty cookie jar; a navigation timeout or a blocked page can prevent refresh. Confirm the configured upstream `BASE_URL` is reachable from the API environment and serves the expected site. `BASE_URL` belongs to the API container; `ANIMEPAHE_API_URL` belongs to SatouBot and points to that container's HTTP endpoint. Recreate the container after changing its environment. Do not substitute an unverified mirror or disable TLS verification. If reporting the failure, include the Dockerfile and run command or Compose configuration with secrets removed, plus the API image version. Upstream source changes require rebuilding the image; restarting the same image does not apply a patch.
-
-<!-- /coderabbit-ai-generated:v1 -->
-
-Run the API in a separate isolated environment without mounting bot credentials or media. Its upstream scraper evaluates web page scripts and launches Chromium without its sandbox. Search results use AnimePahe's own title and episode IDs; the bot does not guess a match to a different catalogue. <!-- coderabbit-ai-generated:v1 -->
-
-<!-- coderabbit-ai-generated-section:v1:c1b98641ea424ffb432c2035c11f5575b7143f608d195f306d04eb9e535c99b5 -->
-
-Episodes are listed in numeric order per AnimePahe title, up to 100 release pages. The bot loads two release pages at most initially and loads other pages only when you choose them. <!-- coderabbit-ai-generated:v1 -->
-
-<!-- coderabbit-ai-generated-section:v1:0062f87cd59a23f528cede796847f06d98f6d7837b06700512eefd2e919d1318 -->
-
-AnimePahe API requests are spaced at least three seconds apart within the bot process; successful search and release responses are cached for one minute. An HTTP 429 pauses requests for the Retry-After duration, or five minutes if unavailable.
-
-<!-- /coderabbit-ai-generated:v1 --> This reduces request bursts but cannot guarantee access: the site may rate limit the shared IP or other clients independently. Wait for an existing rate limit to expire before retrying.
-
-<!-- /coderabbit-ai-generated:v1 --> AnimePahe does not supply a consistent season number through this API, so the menu labels these entries as Episodes. <!-- coderabbit-ai-generated:v1 -->
-
-<!-- coderabbit-ai-generated-section:v1:b02503472b6dfd409ddf958367b3ec34735a99e305b3c86ea5d8d32e75fdcf14 -->
-
-Direct media still goes through the normal link checks and approval flow. When the API returns only a provider web page for a quality, the bot shows it as Manual and does not treat it as a verified downloadable file.
-
-<!-- /coderabbit-ai-generated:v1 --> Source availability and any access restrictions depend on AnimePahe and its host. Live AnimePahe and Telegram transfers have not been verified.
+Only manifests you explicitly saved are queried. No extra catalogue or provider repository is installed automatically. Open **Add-ons → Catalogues / artwork sources** to see each saved catalogue, its media types, and whether it is enabled. Movie cards prefer `poster` over `background`, identify the metadata/artwork source, and fall back to a background only when no poster is supplied. Existing downloaded files and local settings are retained when upgrading; obsolete built-in API manifests and cached results are removed.
 
 
-<!-- /coderabbit-ai-generated:v1 -->
 
-<!-- /coderabbit-ai-generated:v1 -->
-
-<!-- /coderabbit-ai-generated:v1 --> Availability depends on the selected catalogue supplying episode metadata and a source supporting that title. Downloads remain individually confirmed, one transfer at a time; automatic whole-season queues are not implemented.
+<!-- /coderabbit-ai-generated:v1 -->Availability depends on the selected catalogue supplying episode metadata and a source supporting that title. Downloads remain individually confirmed, one transfer at a time; automatic whole-season queues are not implemented.
 
 Download, upload, search, group management, migration and user session code are in separate modules.
 
@@ -311,7 +326,13 @@ This foundation is not configured to start automatically with the PC. A publishe
 
 <!-- coderabbit-ai-generated-section:v1:e198d12a2f3c193d663be702e14d7a9f6edd2cfc5edad39072f4766472d23ddb -->
 
-Inline retrieval of already published Telegram files, migration, source refresh, torrent, DASH, encrypted and live HLS downloads, generic download-page extraction, automated error retries and channel availability monitoring are not implemented yet.
+<!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:b72e8a0edff6364e3d831d87b9b69b4c9ec8865fece4dbaafb8f2ae7ce3f1c31 -->
+
+Inline retrieval of already published Telegram files, migration, source refresh, DASH, encrypted and live HLS downloads, generic download-page extraction, automated error retries and channel availability monitoring are not implemented yet.
+
+<!-- /coderabbit-ai-generated:v1 -->
 
 <!-- /coderabbit-ai-generated:v1 -->
 
@@ -341,7 +362,13 @@ Search can list HTTP links returned by providers; unsupported formats and files 
 Open **Add-ons** (or `/addons`) and send a Stremio catalogue manifest URL, or upload a JSON manifest and then provide its original URL so relative endpoints can be resolved.
 
 <!-- /coderabbit-ai-generated:v1 --> For example, Cinemeta: `https://v3-cinemeta.strem.io/manifest.json`. The catalogue must advertise a movie catalogue with a `search` extra. For Nuvio plugins, movie metadata must include `moviedb_id`, `tmdb_id`, or a `tmdb:` ID.
-3. Add a Nuvio repository URL in the same menu, or use **Add Yoru providers**. The supplied Yoru repository is loaded automatically on the first source lookup if no Nuvio repository has been saved. Manifests persist in the database. Provider scripts are fetched when looking up streams.
+<!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:9304663bb092ebef8e613278569cac528f89457713a3cc82df6e257804713427 -->
+
+3. If desired, explicitly add your Nuvio repository URL in the same menu. Only saved manifests are queried. Manifests persist in the local database. Provider scripts are fetched when looking up streams.
+
+<!-- /coderabbit-ai-generated:v1 -->
 <!-- coderabbit-ai-generated:v1 -->
 
 <!-- coderabbit-ai-generated-section:v1:8619b6da6c26c4ffaea9d24c3732550a9255337a3f2ce19ac84fd333b501d1d2 -->
@@ -350,7 +377,13 @@ Open **Add-ons** (or `/addons`) and send a Stremio catalogue manifest URL, or up
 
 <!-- coderabbit-ai-generated-section:v1:9e3b091aa8baff5c9ac890ae34ed8e48e39a1d6d77e979bef7ef0390c8d5510a -->
 
-Source lookup uses at most four concurrent providers, a 30-second timeout for other providers, an 85-second timeout for AnimePahe, and a 90-second overall timeout.
+<!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:fd21c95820dec32e9f3d7696b33727812b8512bd051fc150ce377b8d0c0118f6 -->
+
+Source lookup uses at most four concurrent providers, a 30-second timeout per provider, and a 90-second overall timeout.
+
+<!-- /coderabbit-ai-generated:v1 -->
 
 <!-- /coderabbit-ai-generated:v1 --> Add-ons on the same host are queried one at a time. Manifest and movie metadata responses are cached in memory for 60 seconds; file availability and access are still checked before downloads. A size labelled unknown is rechecked before download. Search alone never downloads or uploads media.
 

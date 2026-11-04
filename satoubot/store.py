@@ -22,6 +22,10 @@ class Store:
             );
             CREATE INDEX IF NOT EXISTS jobs_source ON jobs(source);
         ''')
+        self.db.execute("DELETE FROM manifests WHERE kind='animepahe'")
+        self.db.execute("DELETE FROM discovery_cache WHERE payload LIKE '%animepahe_%'")
+        self.db.execute("DELETE FROM source_links WHERE json_extract(payload, '$.movie.animepahe_session') IS NOT NULL")
+        self.db.execute("DELETE FROM settings WHERE key LIKE 'animepahe_%'")
         self.db.commit()
 
     def setting(self, key, default=None):

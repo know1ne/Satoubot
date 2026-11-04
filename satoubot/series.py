@@ -25,7 +25,7 @@ class SeriesFunctions:
         videos = ordered_episodes(movie)
         key = self.store.cache('series', movie)
         if season is None:
-            choices = [(('Episodes' if movie.get('animepahe_episodes') else f'Season {s}') if s else 'Specials', f'season:{key}:{s}:0') for s in sorted({v['season'] for v in videos})]
+            choices = [(f'Season {s}' if s else 'Specials', f'season:{key}:{s}:0') for s in sorted({v['season'] for v in videos})]
             title = f'{movie["name"]}\nChoose a season.'
             prefix = 'seasons'
         else:
@@ -35,9 +35,9 @@ class SeriesFunctions:
                 if video['season'] != season: continue
                 selected = dict(base, season=season, episode=video['episode'], embedded_streams=video.get('streams') or [], video_id=video.get('id') or f'{movie["id"]}:{season}:{video["episode"]}')
                 item = self.store.cache('movie', selected)
-                label = (f'Episode {video["episode"]:02d}' if movie.get('animepahe_episodes') else f'S{season:02d}E{video["episode"]:02d}') + f' · {video.get("title") or video.get("name") or "Episode"}'
+                label = f'S{season:02d}E{video["episode"]:02d}' + f' · {video.get("title") or video.get("name") or "Episode"}'
                 choices.append((label[:100], f'movie:{item}'))
-            title = f'{movie["name"]} · ' + ('Episodes' if movie.get('animepahe_episodes') else f'Season {season}') + '\nChoose an episode; files are checked for that episode only.'
+            title = f'{movie["name"]} · ' + f'Season {season}' + '\nChoose an episode; files are checked for that episode only.'
             prefix = f'season:{key}:{season}'
         page = max(0, min(page, max(0, (len(choices)-1)//8)))
         rows = [[Button(label, callback_data=data)] for label, data in choices[page*8:page*8+8]]
@@ -46,42 +46,12 @@ class SeriesFunctions:
         if page: paging.append(Button('Previous', callback_data=f'{route}:{page-1}'))
         if (page+1)*8 < len(choices): paging.append(Button('More', callback_data=f'{route}:{page+1}'))
         if paging: rows.append(paging)
-        release_page = movie.get('animepahe_release_page')
-        release_pages = movie.get('animepahe_release_pages')
-        if season is not None and isinstance(release_page, int) and isinstance(release_pages, int):
-            releases = []
-            if release_page < release_pages: releases.append(Button('Earlier episodes', callback_data=f'apage:{key}:{release_page+1}'))
-            if release_page > 1: releases.append(Button('Later episodes', callback_data=f'apage:{key}:{release_page-1}'))
-            if release_page > 2: releases.append(Button('Latest episodes', callback_data=f'apage:{key}:1'))
-            if releases: rows.append(releases)
-            title += f'\nRelease page {release_pages-release_page+1} of {release_pages}.'
         if not videos: title += '\nThis catalogue did not supply season/episode metadata. Try another enabled catalogue.'
-        if movie.get('episodes_truncated'): title += '\nOnly the first 100 release pages are shown.'
         rows.append(navigation())
         await self.show_panel(None, title, reply_markup=Markup(rows), context=context)
 
     async def series_callback(self, update, context):
         parts = update.callback_query.data.split(':')
-        if parts[0] == 'apage':
-            try:
-                movie = self.store.cached(int(parts[1]), 'series')
-                page = int(parts[2])
-            except (ValueError, IndexError): return
-            if not movie:
-                return await self.show_panel(update.callback_query.message, 'Episodes expired. Search the title again.')
-            service = Discovery(self.store)
-            if not any(url == movie.get('addon') and kind == 'animepahe' for url, kind, _ in service.manifests()):
-                return await self.show_panel(update.callback_query.message, 'AnimePahe is disabled. Enable it in Add-ons to browse episodes.')
-            from . import animepahe
-            async def load_page():
-                try:
-                    next_movie = await animepahe.release_page(movie['addon'], movie, page)
-                    await self.series_menu(context, next_movie, season=1)
-                except animepahe.RateLimitError:
-                    await self.show_panel(update.callback_query.message, 'AnimePahe is rate limiting requests. Wait before trying again.')
-                except Exception:
-                    await self.show_panel(update.callback_query.message, 'Could not load episodes. Try again later.')
-            return await self.start_panel_task('movie', 'Loading episodes…', load_page, context)
         try:
             movie = self.store.cached(int(parts[1]), 'series')
             season = int(parts[2]) if parts[0] == 'season' else None

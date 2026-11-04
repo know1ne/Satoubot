@@ -8,6 +8,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 from .menu import navigation
 from .progress import format_progress
+from .media import inspect_remote_media, track_summary, FORMATS
 from .file_info import probe
 from .hls import download_hls, inspect_hls, HLSError
 from .transfer import MAX_BYTES, MAX_DOWNLOAD_BYTES, download, filename_from_url, inspect_url, safe_name
@@ -31,9 +32,10 @@ class DownloadFunctions:
                 await update.message.reply_text('Could not read the HLS playlist. Try again or use the link manually.', reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('Give link', callback_data=f'directmanual:{manual}')], navigation()])); return
             name = Path(filename_from_url(text)).stem + '.' + plan['format']
             job = self.store.create(text, Path(name).stem, name, 0)
+            self.save_transfer_options(job)
             self.store.set_setting(f'job:{job}:hls', plan['format'])
-            keyboard = InlineKeyboardMarkup([[InlineKeyboardButton('Transfer', callback_data=f'dl:{job}'), InlineKeyboardButton('Give link', callback_data=f'directlink:{job}'), InlineKeyboardButton('No', callback_data=f'skip:{job}')], navigation()])
-            await update.message.reply_text(f'Item #{job}\nName: {name}\nSize: unknown. Local download limit: 10 GB. Telegram upload available only at or below 2 GB.\nDownload this file?', reply_markup=keyboard)
+            keyboard = InlineKeyboardMarkup([[InlineKeyboardButton('Transfer', callback_data=f'dl:{job}'), InlineKeyboardButton('Download only', callback_data=f'dllocal:{job}'), InlineKeyboardButton('Give link', callback_data=f'directlink:{job}'), InlineKeyboardButton('No', callback_data=f'skip:{job}')], navigation()])
+            await update.message.reply_text(f'Item #{job}\nName: {name}\nSize: unknown. Local download limit: 10 GB. Telegram upload available only at or below 2 GB.\nOutput: {FORMATS[self.transfer_options()["output_format"]]}\nAudio/subtitle tracks: not supplied; inspected after download.\nDownload this file?', reply_markup=keyboard)
             return
         if info.get('status') != 'ready' or not info.get('size'):
             reason=info.get('reason','Size unknown')
@@ -57,9 +59,15 @@ class DownloadFunctions:
             await update.message.reply_text('This appears to be a web page, not a direct file. Page link extraction is not yet supported.')
             return
         name = info.get('filename') or filename_from_url(text)
+        tracks = 'Audio/subtitle tracks: unavailable before download.'
+        try:
+            tracks = 'File sample (may be incomplete):\n' + track_summary(await asyncio.wait_for(inspect_remote_media(text, size), 12))
+        except Exception:
+            pass
         job = self.store.create(text, Path(name).stem, name, size)
-        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton('Transfer', callback_data=f'dl:{job}'), InlineKeyboardButton('Give link', callback_data=f'directlink:{job}'), InlineKeyboardButton('No', callback_data=f'skip:{job}')], navigation()])
-        await update.message.reply_text(f'Item #{job}\nName: {name}\nEstimated size: {size / 1_000_000:.1f} MB\n' + ('Above the 2 GB Telegram limit; this file will be saved locally.\n' if size > MAX_BYTES else '') + 'Download this file?', reply_markup=keyboard)
+        self.save_transfer_options(job)
+        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton('Transfer', callback_data=f'dl:{job}'), InlineKeyboardButton('Download only', callback_data=f'dllocal:{job}'), InlineKeyboardButton('Give link', callback_data=f'directlink:{job}'), InlineKeyboardButton('No', callback_data=f'skip:{job}')], navigation()])
+        await update.message.reply_text(f'Item #{job}\nName: {name}\nEstimated size: {size / 1_000_000:.1f} MB\n' + ('Above the 2 GB Telegram limit; this file will be saved locally.\n' if size > MAX_BYTES else '') + f'Output: {FORMATS[self.transfer_options()["output_format"]]}\n{tracks}\nDownload this file?', reply_markup=keyboard)
 
 
     async def perform_download(self, context, job_id):
@@ -120,7 +128,7 @@ class DownloadFunctions:
             stage='Checking'
             approved=folder/job['filename']
             if approved != path: path.rename(approved)
-            self.store.update(job_id, state='local_only' if actual_size > MAX_BYTES else 'review', path=str(approved), size=actual_size)
+            self.store.update(job_id, state='processing', path=str(approved), size=actual_size)
         except asyncio.CancelledError:
             self.store.update(job_id, state='cancelled', error='Cancelled')
             if message:
@@ -141,10 +149,12 @@ class DownloadFunctions:
             await asyncio.gather(timer,return_exceptions=True)
             await self.panel_status(context, 'transfer')
         try:
-            if actual_size > MAX_BYTES:
-                await context.bot.send_message(self.admin_id, f'Download done: {job["filename"]} ({actual_size/1_000_000:.1f} MB). Saved locally: {approved}\nAbove the 2 GB Telegram upload limit; open this file on your PC.')
-            else:
-                await context.bot.send_message(self.admin_id,f'Download done: {original} ({actual_size/1_000_000:.1f} MB). Review the proposed upload name below.')
-                await self.preview(context, job_id)
+            await self.finish_local(context, job_id, approved)
+        except asyncio.CancelledError:
+            self.retain_local(job_id, approved, 'Processing cancelled; local file retained')
+            raise
         except Exception as exc:
-            log.warning('Preview %s failed: %s', job_id, type(exc).__name__)
+            log.warning('Local review %s failed: %s', job_id, type(exc).__name__)
+            self.retain_local(job_id, approved, 'Review unavailable; local file retained')
+        finally:
+            await self.panel_status(context, 'transfer')

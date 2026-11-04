@@ -15,11 +15,11 @@ class MenuFunctions:
         busy = self.transfer_busy()
         state = 'on' if self.transfers_enabled() else 'off'
         rows = [[Button('Download' + (' (busy)' if busy else ''), callback_data='menu:download'), Button('Upload approvals', callback_data='menu:pending')],
-                [Button('Add-ons', callback_data='menu:addons'), Button('Saved links', callback_data='menu:saved')],
+                [Button('Add-ons', callback_data='menu:addons'), Button('Saved files / links', callback_data='menu:saved')],
                 [Button('Library search', callback_data='menu:library'), Button('My channels', callback_data='menu:channels')],
                 [Button('Active transfers', callback_data='menu:active'), Button('Admin management', callback_data='menu:admins')],
                 [Button('Daily Uploads', callback_data='menu:daily'), Button('Migration', callback_data='menu:migration')],
-                [Button('Source history', callback_data='menu:sourcehistory')],
+                [Button('Source history', callback_data='menu:sourcehistory'), Button('Settings', callback_data='menu:settings')],
                 [Button('Stop transfers' if self.transfers_enabled() else 'Start transfers', callback_data='menu:toggle')]]
         await self.show_panel(message, f'Main menu · Transfers {state}\nSend a movie title to search catalogues.', reply_markup=Markup(rows))
 
@@ -61,7 +61,10 @@ class MenuFunctions:
             try: job = self.store.get(int(action.split(':')[1]))
             except ValueError: return
             if job and job['state'] == 'local_only':
-                await q.message.reply_text(f'{job["filename"]} · {job["size"]/1_000_000:.1f} MB\nSaved locally: {job["path"]}'); return
+                rows = [[Button('Convert format', callback_data=f'convertmenu:{job["id"]}')]]
+                if job['size'] <= 2_000_000_000: rows.append([Button('Review Telegram upload', callback_data=f'localreview:{job["id"]}')])
+                rows.append(navigation())
+                await self.show_panel(q.message, f'{job["filename"]} · {job["size"]/1_000_000:.1f} MB\nSaved locally: {job["path"]}', reply_markup=Markup(rows)); return
             if job and job['state'] in ('oversize', 'reported', 'link_only'):
                 await q.message.reply_text(f'{job["filename"]} · {job["size"]/1_000_000:.1f} MB\n{job["source"]}', disable_web_page_preview=True)
             return
@@ -79,6 +82,7 @@ class MenuFunctions:
             self.panel().results.pop(key, None)
             return await self.show_panel(q.message, result['text'], reply_markup=Markup(rows))
         if action in ('main','cancel'):
+            if action == 'cancel': await self.cancel_panel_tasks()
             self.clear_prompt(context)
             await self.main_menu(q.message);return
         if action in ('sourcehistory', 'sourcehistorytoggle'):
@@ -94,6 +98,12 @@ class MenuFunctions:
             lines = [f'{row["host"]}: {row["ready"]} ready, {row["manual"]} manual, {row["temporary"]} temporary, {row["unavailable"]} unavailable' for row in history]
             rows = [[Button('Stop idle checks' if enabled else 'Start idle checks', callback_data='menu:sourcehistorytoggle')], navigation()]
             return await self.show_panel(q.message, 'Source history · idle checks ' + ('on' if enabled else 'off') + '\n' + ('\n'.join(lines) or 'No checks recorded yet.'), reply_markup=Markup(rows))
+        if action == 'catalogues': return await self.catalogues_menu(q.message)
+        if action.startswith('cataloguespage:'):
+            try: page = int(action.split(':')[1])
+            except ValueError: return
+            return await self.catalogues_menu(q.message, page)
+        if action == 'settings': return await self.settings_menu(q.message)
         if action == 'daily': return await self.daily_menu(q.message, context)
         if action == 'active': return await self.active_menu(q.message)
         if action == 'canceltransfer':
@@ -115,7 +125,7 @@ class MenuFunctions:
         self.clear_prompt(context)
         proxy=SimpleNamespace(message=q.message,effective_user=update.effective_user,effective_chat=update.effective_chat)
         if action == 'download':
-            text='A transfer is active. Wait before starting another.' if self.transfer_busy() else 'Send a direct HTTP(S) media link.'
+            text='A transfer is active. Wait before starting another.' if self.transfer_busy() else 'Send a direct HTTP(S) media link, magnet link, or .torrent document.'
             await self.show_panel(q.message, text,reply_markup=Markup([navigation()]));return
         if action == 'library':
             context.user_data['search_pending']=True

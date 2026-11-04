@@ -7,6 +7,7 @@ import secrets
 import tempfile
 import warnings
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import psutil
 from PIL import Image, ImageOps
@@ -17,6 +18,8 @@ from telegram.ext import (Application, CallbackQueryHandler, CommandHandler,
                           MessageHandler, InlineQueryHandler, filters)
 from telegram.error import TelegramError
 
+from .preferences import PreferenceFunctions, recover_local_jobs
+from .torrent_ui import TorrentFunctions
 from .store import Store
 from .transfer import safe_name
 from .download import DownloadFunctions
@@ -31,7 +34,6 @@ from .discovery import Discovery
 from .menu import MenuFunctions, navigation
 from .interface import InterfaceFunctions
 from .series import SeriesFunctions
-from .animepahe import register_default, DEFAULT_API
 from .transfer import MAX_BYTES
 from .daily import DailyFunctions
 from .source_history import SourceHistoryFunctions
@@ -86,7 +88,7 @@ def latest_command(handler, *, clear_prompt=True):
     return wrapped
 
 
-class Bot(SourceHistoryFunctions, DailyFunctions, SeriesFunctions, InterfaceFunctions, MenuFunctions, DestinationFunctions, CatalogueFunctions, DownloadFunctions, UploadFunctions, SearchFunctions, GroupManagementFunctions, MigrationFunctions):
+class Bot(PreferenceFunctions, TorrentFunctions, SourceHistoryFunctions, DailyFunctions, SeriesFunctions, InterfaceFunctions, MenuFunctions, DestinationFunctions, CatalogueFunctions, DownloadFunctions, UploadFunctions, SearchFunctions, GroupManagementFunctions, MigrationFunctions):
     def __init__(self, store, media_dir, admin_id, uploader, upload_parallel_parts=1):
         self.store, self.media_dir, self.owner_id, self.uploader = store, media_dir, admin_id, uploader
         if not 1 <= upload_parallel_parts <= 4:
@@ -212,6 +214,10 @@ class Bot(SourceHistoryFunctions, DailyFunctions, SeriesFunctions, InterfaceFunc
             return await self.begin_search(update.message, text)
         if context.user_data.pop('search_pending', False):
             return await self.search_query(update, text)
+        if text.startswith(('http://','https://')) and urlsplit(text).path.lower().endswith('.torrent'):
+            return await self.start_panel_task('torrent', 'Fetching torrent metadata…', lambda: self.torrent_url(context, text), context)
+        if text.startswith('magnet:'):
+            return await self.start_panel_task('torrent', 'Fetching torrent metadata…', lambda: self.import_torrent(context, magnet=text), context)
         if not text.startswith(('https://', 'http://')):
             return await self.begin_search(update.message, text)
         await self.handle_source(update, text)
@@ -220,6 +226,34 @@ class Bot(SourceHistoryFunctions, DailyFunctions, SeriesFunctions, InterfaceFunc
         if not self.authorized(update): return
         q = update.callback_query
         await q.answer()
+        if q.data.startswith('pref:'):
+            return await self.preference_callback(update, context)
+        if q.data.startswith(('torrentpage:', 'torrentpick:', 'torrentlocal:', 'torrentreview:')):
+            return await self.torrent_callback(update, context)
+        if q.data.startswith('localreview:'):
+            try: job_id = int(q.data.split(':')[1])
+            except ValueError: return
+            job = self.store.get(job_id)
+            if job and job['state'] == 'local_only' and job['size'] <= MAX_BYTES:
+                self.store.update(job_id, state='review')
+                return await self.preview(context, job_id)
+            return
+        if q.data.startswith('convertmenu:'):
+            try: job_id = int(q.data.split(':')[1])
+            except ValueError: return
+            return await self.conversion_menu(context, job_id)
+        if q.data.startswith('convert:'):
+            try: _, number, selection = q.data.split(':'); job_id = int(number)
+            except ValueError: return
+            from .media import FORMATS
+            job = self.store.get(job_id)
+            if not job or job['state'] not in ('review', 'local_only') or selection not in FORMATS or selection == 'original': return
+            if not await self.transfer_gate(q.message): return
+            previous_state = job['state']
+            self.store.update(job_id, state='converting', approval_token='')
+            self.active_description = f'Converting #{job_id}'
+            self.spawn(self.convert_job(context, job_id, selection, previous_state))
+            return
         if q.data.startswith('daily:'):
             return await self.daily_callback(update, context)
         if q.data.startswith('directmanual:'):
@@ -233,7 +267,7 @@ class Bot(SourceHistoryFunctions, DailyFunctions, SeriesFunctions, InterfaceFunc
             if job:
                 await q.message.reply_text(job['source'], disable_web_page_preview=True)
             return
-        if q.data.startswith(('season:', 'seasons:', 'apage:')):
+        if q.data.startswith(('season:', 'seasons:')):
             return await self.series_callback(update, context)
         if q.data.startswith(('addonpage:', 'addonproviders:', 'addontoggle:')):
             return await self.addon_callback(update, context)
@@ -248,7 +282,7 @@ class Bot(SourceHistoryFunctions, DailyFunctions, SeriesFunctions, InterfaceFunc
             return await self.menu_callback(update, context)
         if q.data == 'destcancel' or q.data.startswith(('dest:', 'choose_dest:')):
             return await self.select_destination(update, context)
-        if q.data in ('defaultproviders', 'searchagain') or q.data.startswith(('movie:', 'file:', 'retryfile:', 'page:', 'cancelpage:', 'yes:', 'no:', 'link:')):
+        if q.data == 'searchagain' or q.data.startswith(('movie:', 'file:', 'retryfile:', 'page:', 'cancelpage:', 'yes:', 'yeslocal:', 'no:', 'link:')):
             return await self.catalogue_callback(update, context)
         try:
             parts = q.data.split(':')
@@ -256,6 +290,11 @@ class Bot(SourceHistoryFunctions, DailyFunctions, SeriesFunctions, InterfaceFunc
             job = self.store.get(job_id)
         except (ValueError, AttributeError): return
         if not job: return
+        if action == 'keeplocal' and job['state'] == 'review':
+            if len(parts) != 3 or parts[2] != job['approval_token']: return
+            self.store.update(job_id, state='local_only', approval_token='')
+            await q.message.reply_text('Kept locally. Open Saved files to review or convert later.')
+            return
         if action == 'report' and job['state'] in ('oversize', 'reported', 'link_only'):
             self.store.update(job_id, state='reported')
             await q.message.reply_text('Link reported and saved. Automatic source searches are not available yet.')
@@ -269,8 +308,9 @@ class Bot(SourceHistoryFunctions, DailyFunctions, SeriesFunctions, InterfaceFunc
             self.store.update(job_id,state='cancelled')
             await q.edit_message_reply_markup(reply_markup=None)
             await q.message.reply_text('Download cancelled.')
-        elif action == 'dl' and job['state'] == 'ready':
+        elif action in ('dl', 'dllocal') and job['state'] == 'ready':
             if not await self.transfer_gate(q.message): return
+            if action == 'dllocal': self.store.set_setting(f'job:{job_id}:download_mode', 'local')
             self.active_description = f'Downloading #{job_id} · {job["filename"]}'
             self.store.update(job_id, state='downloading')
             self.spawn(self.perform_download(context, job_id))
@@ -318,16 +358,25 @@ class Bot(SourceHistoryFunctions, DailyFunctions, SeriesFunctions, InterfaceFunc
         token = secrets.token_hex(4)
         self.store.update(job_id, target=target, approval_token=token)
         keyboard = InlineKeyboardMarkup([[InlineKeyboardButton('Approve upload', callback_data=f'upload:{job_id}:{token}')],
+                                         [InlineKeyboardButton('Convert format', callback_data=f'convertmenu:{job_id}')],
+                                         [InlineKeyboardButton('Keep locally', callback_data=f'keeplocal:{job_id}:{token}')],
                                          [InlineKeyboardButton('Set thumbnail', callback_data=f'thumb:{job_id}:{token}')],
                                          [InlineKeyboardButton('Select channel', callback_data=f'choose_dest:{job_id}')],
                                          navigation()])
         text = f'Ready for review #{job_id}\nName: {job["filename"]}\nSize: {job["size"]/1_000_000:.1f} MB\nSaved: {job["path"]}\nDestination: {target or "not selected"}\nUse /rename {job_id} new name before approval.'
+        import json
+        from .media import track_summary
+        metadata = self.store.setting(f'job:{job_id}:media')
+        if metadata:
+            try: text += '\n' + track_summary(json.loads(metadata))
+            except (ValueError, TypeError): pass
+        text = text[:4000]
         if job['thumbnail']:
             with open(job['thumbnail'], 'rb') as photo:
-                await context.bot.send_photo(self.admin_id, photo=photo, caption=text, reply_markup=keyboard)
-        else:
+                await context.bot.send_photo(self.admin_id, photo=photo, caption=text if len(text) <= 1000 else job['filename'], reply_markup=keyboard if len(text) <= 1000 else None)
+        if not job['thumbnail'] or len(text) > 1000:
             await context.bot.send_message(self.admin_id, text, reply_markup=keyboard)
-        if not target: await self.destination_menu(context,job_id)
+        # Destination selection is explicit; opening review never forces an upload setup.
 
     async def thumbnail_photo(self, update, context):
         if not self.authorized(update): return
@@ -429,8 +478,8 @@ def main():
     # An interrupted upload may already be present; require manual inspection.
     store.db.execute("UPDATE jobs SET state='upload_unknown' WHERE state='uploading'")
     store.db.execute("UPDATE jobs SET state='failed' WHERE state='downloading'")
+    recover_local_jobs(store)
     store.db.commit()
-    register_default(store, os.getenv('ANIMEPAHE_API_URL') or DEFAULT_API)
     sessions = SessionManager(root, api_id, api_hash)
     uploader = sessions.user
     try:
@@ -474,6 +523,7 @@ def main():
     application.add_handler(CommandHandler('rename', latest_command(bot.rename), block=False))
     application.add_handler(CommandHandler('find', latest_command(bot.find), block=False))
     application.add_handler(CommandHandler('search', latest_command(bot.online_search), block=False))
+    application.add_handler(CommandHandler('settings', latest_command(bot.settings), block=False))
     application.add_handler(CommandHandler('addons', latest_command(bot.addons), block=False))
     application.add_handler(InlineQueryHandler(admin_session(bot.inline_search)))
     application.add_handler(CommandHandler('saved', latest_command(bot.saved), block=False))
@@ -482,7 +532,7 @@ def main():
     application.add_handler(CallbackQueryHandler(admin_session(bot.callback)))
     application.add_handler(MessageHandler(filters.StatusUpdate.CHAT_SHARED, admin_session(bot.chat_shared)))
     application.add_handler(MessageHandler(filters.PHOTO, admin_session(bot.thumbnail_photo)))
-    application.add_handler(MessageHandler(filters.Document.ALL, admin_session(bot.manifest_document)))
+    application.add_handler(MessageHandler(filters.Document.ALL, admin_session(bot.torrent_document)))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, latest_command(bot.text, clear_prompt=False), block=False))
     try:
         asyncio.get_event_loop()

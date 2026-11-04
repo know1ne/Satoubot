@@ -8,12 +8,12 @@ from telegram import (InlineKeyboardButton as Button, InlineKeyboardMarkup as Ma
                       InlineQueryResultArticle, InputTextMessageContent)
 from .menu import navigation
 from .artwork import landscape
-from .discovery import Discovery, DEFAULT_PROVIDERS
+from .media import reported_tracks, FORMATS, inspect_remote_media, track_summary
+from .discovery import Discovery
 from .transfer import MAX_BYTES, MAX_DOWNLOAD_BYTES, inspect_url, safe_name
 from .file_info import probe, clean_title
 from .source_history import record_check, reliability
 from .hls import inspect_hls, HLSError
-from .animepahe import RateLimitError
 
 
 class CatalogueFunctions:
@@ -44,12 +44,11 @@ class CatalogueFunctions:
         if page: paging.append(Button('Previous', callback_data=f'addonpage:{key}:{page-1}'))
         if (page+1)*8 < len(entries): paging.append(Button('More', callback_data=f'addonpage:{key}:{page+1}'))
         if paging: rows.append(paging)
+        if not repository: rows.append([Button('Catalogues / artwork sources', callback_data='menu:catalogues')])
         rows.append([Button('Add manifest', callback_data='menu:addmanifest')])
         rows.append(navigation())
         title = 'Providers' if repository else 'Add-ons'
         text = f'{title} · Page {page+1}\nTap to turn ON/OFF. Changes apply to new lookups.'
-        if not repository and any(kind == 'animepahe' for _, kind, _ in service.manifests(active=False)):
-            text += '\nAnimePahe requires its separate API to be running.'
         if repository and not service.enabled(repository): text += '\nThe repository is OFF; enable it in Add-ons to use these providers.'
         if not entries: text += '\nNo sources saved. Add a manifest to get started.'
         await self.show_panel(update.message, text, reply_markup=Markup(rows))
@@ -76,7 +75,7 @@ class CatalogueFunctions:
         context.user_data['manifest_pending'] = True
         names = [m.get('name', 'Add-on') for _, _, m in Discovery(self.store).manifests()]
         await self.show_panel(update.message, 'Send the catalogue/add-on manifest URL (Stremio format), or a Nuvio provider manifest URL.\nSaved: ' + (', '.join(names) or 'none') + '\nUse /search <movie name> after adding a catalogue.',
-            reply_markup=Markup([[Button('Add Yoru providers', callback_data='defaultproviders')], navigation()]))
+            reply_markup=Markup([navigation()]))
 
     async def manifest_document(self, update, context):
         if not self.authorized(update): return
@@ -118,8 +117,8 @@ class CatalogueFunctions:
 
     async def begin_search(self, message, query):
         await self.cancel_panel_tasks()
-        if not any(k in ('addon', 'animepahe') for _, k, _ in Discovery(self.store).manifests()):
-            await message.reply_text('Enable AnimePahe or add a catalogue manifest using Add-ons first.')
+        if not any(k == 'addon' for _, k, _ in Discovery(self.store).manifests()):
+            await message.reply_text('Add or enable a catalogue manifest using Add-ons first.')
             return
         await self.show_panel(message, f'Searching for {query[:120]}…', reply_markup=Markup([navigation()]))
         await self.start_panel_task('search', f'Search: {query[:120]}', lambda: self.search_results(message, query), None)
@@ -137,11 +136,6 @@ class CatalogueFunctions:
             text = 'Choose a movie to see its image, details and available files. No download starts until you select one.' if movies else 'No matching movies found.'
             if errors:
                 text += '\nSome catalogues failed. Try again later.'
-                from .animepahe import NAME
-                if NAME + ' (rate limited)' in errors:
-                    text += '\nAnimePahe is rate limiting requests. Wait before trying again.'
-                elif NAME in errors:
-                    text += '\nAnimePahe API failed or timed out. Check its container logs and ANIMEPAHE_API_URL. No manifest is needed for AnimePahe.'
             key = self.store.cache('search_panel', {'text': text, 'buttons': result_buttons})
             panel = self.panel()
             async with panel.lock:
@@ -181,7 +175,12 @@ class CatalogueFunctions:
         card = None
         card_is_photo = False
         last_update = 0.0
-        artwork = movie.get('background') or movie.get('poster')
+        artwork = movie.get('poster') or movie.get('background')
+        metadata_url = movie.get('metadata_source') or movie.get('addon')
+        metadata_name = next((m.get('name', 'Catalogue') for u, _, m in service.manifests(active=False) if u == metadata_url), 'Selected catalogue')
+        artwork_url = movie.get('artwork_source') or metadata_url
+        artwork_name = next((m.get('name', 'Catalogue') for u, _, m in service.manifests(active=False) if u == artwork_url), metadata_name)
+        art_kind = 'poster' if movie.get('poster') else 'background (no poster supplied)'
         artwork_task = asyncio.create_task(landscape(artwork)) if artwork else None
 
         async def render(final=False):
@@ -191,9 +190,10 @@ class CatalogueFunctions:
             self.store.db.commit()
             if not cursor.rowcount: return
             qualities = ', '.join(dict.fromkeys(str(s.get('quality') or 'unspecified')[:35] for s in checked))[:250]
-            episode_label = (' · Episode ' + str(movie['episode']) if movie.get('animepahe_episodes') else f' · S{movie["season"]:02d}E{movie["episode"]:02d}') if movie.get('season') is not None else ''
+            episode_label = f' · S{movie["season"]:02d}E{movie["episode"]:02d}' if movie.get('season') is not None else ''
             count_label = 'Available options' if any(s.get('manual_page') for s in checked) else 'Available files'
             caption = f'{movie["name"][:150]}{episode_label}\nYear: {movie.get("year") or movie.get("releaseInfo") or "unknown"}\nQualities: {qualities or "none found"}\n{count_label}: {len(source_ids)}'
+            caption += f'\nMetadata: {str(metadata_name)[:80]}\nArtwork: {str(artwork_name)[:80]} · {art_kind}'
             caption += '\nDW: checked for download. Manual and Retry links follow. Select a file to review it.'
             if not final: caption += '\nSearching other providers…'
             if errors: caption += f'\n{len(errors)} source(s) failed or need configuration; search again to retry.'
@@ -233,7 +233,13 @@ class CatalogueFunctions:
                 headers = stream.get('headers') or {}
                 stream['headers'] = {str(k): str(v) for k,v in headers.items()} if isinstance(headers, dict) else {}
                 try:
-                    if stream.get('manual_page'):
+                    if stream['url'].startswith('magnet:'):
+                        from .torrent import normalize_magnet
+                        stream['url'] = normalize_magnet(stream['url'])[0]
+                        stream['torrent'] = True
+                        stream['file_type'] = 'torrent'
+                        info = {'status':'manual', 'reason':'Torrent metadata and file selection required'}
+                    elif stream.get('manual_page'):
                         info = {'status':'manual', 'reason':'Provider page; open it to choose or download manually'}
                         stream['file_type'] = 'page'
                     else:
@@ -309,14 +315,6 @@ class CatalogueFunctions:
 
     async def catalogue_callback(self, update, context):
         q = update.callback_query
-        if q.data == 'defaultproviders':
-            try:
-                name, _ = await Discovery(self.store).add(DEFAULT_PROVIDERS)
-                await self.show_panel(q.message, f'Saved {name}. Add your catalogue manifest next if you have not added one.')
-                context.user_data.pop('manifest_pending', None)
-            except Exception:
-                await self.show_panel(q.message, 'Could not load the provider manifest. Try again later.', reply_markup=Markup([navigation()]))
-            return
         if q.data == 'searchagain':
             context.user_data['catalogue_search_pending'] = True
             await self.show_panel(q.message, 'Send another movie name.')
@@ -340,13 +338,14 @@ class CatalogueFunctions:
         elif action == 'link':
             stream = self.store.cached(key, 'confirmation')
             if stream: await context.bot.send_message(self.admin_id, stream['url'], disable_web_page_preview=True)
-        elif action in ('yes', 'no'):
+        elif action in ('yes', 'yeslocal', 'no'):
             stream = self.store.cached(key, 'confirmation')
             if not stream:
                 await q.message.reply_text('This confirmation expired or was already used.'); return
-            if action == 'yes' and not await self.transfer_gate(q.message): return
+            if action != 'no' and not await self.transfer_gate(q.message): return
             self.store.db.execute("DELETE FROM discovery_cache WHERE id=? AND kind='confirmation'",(key,));self.store.db.commit()
-            if action == 'yes':
+            if action != 'no':
+                if action == 'yeslocal': stream.setdefault('transfer_options', {})['download_mode'] = 'local'
                 self.active_description = f'Checking {stream.get("filename") or stream["movie"]["name"]}'
                 self.spawn(self.download_choice(context, stream))
             await q.edit_message_reply_markup(reply_markup=None)
@@ -374,7 +373,7 @@ class CatalogueFunctions:
         rows=[]
         for _, key, stream in choices[page*4:page*4+4]:
             size=stream.get('size'); size_text=f'{size/1_000_000:.1f} MB' if isinstance(size,(int,float)) else 'size unknown'
-            action=('Unavailable' if stream.get('check_status') == 'unavailable' else 'Retry') if key < 0 else ('HLS' if stream.get('hls_candidate') else 'Manual' if stream.get('check_status') == 'manual' else ('Link' if isinstance(size,(int,float)) and size>MAX_DOWNLOAD_BYTES else ('DW' if size else 'Size unknown')))
+            action=('Unavailable' if stream.get('check_status') == 'unavailable' else 'Retry') if key < 0 else ('Torrent' if stream.get('torrent') else 'HLS' if stream.get('hls_candidate') else 'Manual' if stream.get('check_status') == 'manual' else ('Link' if isinstance(size,(int,float)) and size>MAX_DOWNLOAD_BYTES else ('DW' if size else 'Size unknown')))
             if action == 'DW' and self.transfer_busy(): action = 'Wait (busy)'
             quality=str(stream.get('quality') or stream.get('title') or stream.get('name') or 'quality unknown')[:65]
             rows.append([Button(f'{action} {quality} | {size_text} | {stream.get("file_type","unknown")}'[:120],callback_data=f'{"retryfile" if key < 0 else "file"}:{abs(key)}')])
@@ -387,9 +386,12 @@ class CatalogueFunctions:
 
     async def prepare_choice(self, context, stream):
         try:
+            if stream.get('torrent') or stream['url'].startswith('magnet:'):
+                return await self.import_torrent(context, magnet=stream['url'])
             if stream.get('manual_page'):
                 await context.bot.send_message(self.admin_id, f"Provider page; open it to choose or download manually.\n{stream['url']}", disable_web_page_preview=True)
                 return
+            stream = dict(stream, transfer_options=self.transfer_options())
             info=await probe(stream['url'],stream.get('headers'))
             state=info.get('status','ready')
             if state != 'ready' and info.get('hls_candidate'):
@@ -400,7 +402,7 @@ class CatalogueFunctions:
                     await context.bot.send_message(self.admin_id, f'Could not check this HLS playlist. You can use the link manually.\n{stream["url"]}', disable_web_page_preview=True); return
                 stream = dict(stream, hls=True, hls_format=plan['format'], size=None, file_type=plan['format'])
                 key = self.store.cache('confirmation',stream)
-                await context.bot.send_message(self.admin_id, f"Download HLS?\nCatalogue: {clean_title(stream['movie'],stream)}\nSize: unknown; local limit 10 GB.\nTelegram upload is offered only if the finished file is at most 2 GB.", reply_markup=Markup([[Button('Transfer',callback_data=f'yes:{key}'),Button('Give link',callback_data=f'link:{key}'),Button('No',callback_data=f'no:{key}')], navigation()])); return
+                await context.bot.send_message(self.admin_id, f"Download HLS?\nCatalogue: {clean_title(stream['movie'],stream)}\n{reported_tracks(stream)}\nOutput: {FORMATS[self.transfer_options()['output_format']]}\nSize: unknown; local limit 10 GB.\nTelegram upload is offered only if the finished file is at most 2 GB.", reply_markup=Markup([[Button('Transfer',callback_data=f'yes:{key}'),Button('Download only',callback_data=f'yeslocal:{key}'),Button('Give link',callback_data=f'link:{key}'),Button('No',callback_data=f'no:{key}')], navigation()])); return
             if state != 'ready':
                 retry = info.get('retry_after')
                 hint = f' Retry after {retry}.' if retry else ''
@@ -422,7 +424,13 @@ class CatalogueFunctions:
                 await context.bot.send_message(self.admin_id,f"{clean_title(stream['movie'],stream)}\n{actual}\n{size/1_000_000:.1f} MB — above 10 GB. Saved as a link. Download it manually.\n{stream['url']}",disable_web_page_preview=True)
                 return
             key=self.store.cache('confirmation',stream)
-            await context.bot.send_message(self.admin_id,f"Download this file?\nCatalogue: {clean_title(stream['movie'],stream)}\nActual file: {stream['filename']}\nSize: {size/1_000_000:.1f} MB\n{'Above 2 GB: local download only. ' if size > MAX_BYTES else ''}Format: {stream.get('file_type','unknown')}\nSource: {stream.get('provider','unknown')}",reply_markup=Markup([[Button('Transfer',callback_data=f'yes:{key}'),Button('Give link',callback_data=f'link:{key}'),Button('No',callback_data=f'no:{key}')], navigation()]))
+            track_text = reported_tracks(stream)
+            try:
+                metadata = await asyncio.wait_for(inspect_remote_media(stream['url'], size, stream.get('headers')), 12)
+                track_text = 'File sample (may be incomplete):\n' + track_summary(metadata)
+            except Exception:
+                pass
+            await context.bot.send_message(self.admin_id,f"Download this file?\nCatalogue: {clean_title(stream['movie'],stream)}\nActual file: {stream['filename']}\nSize: {size/1_000_000:.1f} MB\n{'Above 2 GB: local download only. ' if size > MAX_BYTES else ''}Format: {stream.get('file_type','unknown')}\nSource: {stream.get('provider','unknown')}\n{track_text}\nOutput: {FORMATS[self.transfer_options()['output_format']]}",reply_markup=Markup([[Button('Transfer',callback_data=f'yes:{key}'),Button('Download only',callback_data=f'yeslocal:{key}'),Button('Give link',callback_data=f'link:{key}'),Button('No',callback_data=f'no:{key}')], navigation()]))
         except Exception:
             await context.bot.send_message(self.admin_id,'Could not verify this source and its size. No download started. Try another link.')
 
@@ -434,8 +442,6 @@ class CatalogueFunctions:
                 await self.series_menu(context, movie)
             else:
                 await self.movie_card(context, key)
-        except RateLimitError:
-            await context.bot.send_message(self.admin_id, 'AnimePahe is rate limiting requests. Wait before trying again.')
         except Exception:
             await context.bot.send_message(self.admin_id, 'Could not fetch file results. Please try /search again.')
 
@@ -474,6 +480,7 @@ class CatalogueFunctions:
         title = clean_title(movie,stream)
         filename = safe_name(title) + suffix
         job = self.store.create(url, title, filename, size or 0)
+        self.save_transfer_options(job, stream.get('transfer_options'))
         if is_hls:
             self.store.set_setting(f'job:{job}:hls', stream['hls_format'])
             self.store.set_setting(f'job:{job}:quality', stream.get('quality') or '')
@@ -493,7 +500,7 @@ class CatalogueFunctions:
         self.active_description = f'Downloading #{job} · {filename}'
         folder = self.media_dir / str(job); folder.mkdir(exist_ok=True)
         try:
-            artwork = movie.get('background') or movie.get('poster')
+            artwork = movie.get('poster') or movie.get('background')
             if artwork:
                 image = await landscape(artwork, small=True)
                 path = folder / 'catalogue.jpg'; path.write_bytes(image.getvalue())
@@ -519,9 +526,31 @@ class CatalogueFunctions:
                     key = self.store.cache('movie', movie)
                     results.append(InlineQueryResultArticle(str(key), movie['name'],
                         description=str(movie.get('year') or movie.get('releaseInfo') or ''),
-                        thumbnail_url=movie.get('background') or movie.get('poster'),
+                        thumbnail_url=movie.get('poster') or movie.get('background'),
                         input_message_content=InputTextMessageContent(f'{movie["name"]}\n{movie.get("year") or movie.get("releaseInfo") or ""}'),
                         reply_markup=Markup([[Button('View available files', url=f'https://t.me/{context.bot.username}?start=movie_{key}')]])))
             except Exception:
                 pass
         await q.answer(results, cache_time=0, is_personal=True)
+
+    async def catalogues_menu(self, message, page=0):
+        sources = [(url, kind, manifest) for url, kind, manifest in Discovery(self.store).manifests(active=False) if kind == 'addon']
+        page = max(0, min(page, max(0, (len(sources)-1)//5)))
+        lines = ['Your catalogues and metadata sources', 'Artwork preference: poster; background only if no poster is supplied.']
+        for url, _, manifest in sources[page*5:page*5+5]:
+            enabled = Discovery(self.store).enabled(url)
+            lines.append(f'\n{manifest.get("name", "Catalogue")} · {"ON" if enabled else "OFF"} · {urlparse(url).hostname}')
+            catalogs = manifest.get('catalogs', [])
+            for catalog in catalogs[:10]:
+                if isinstance(catalog, dict):
+                    lines.append(f'• {catalog.get("name") or catalog.get("id")} ({catalog.get("type", "unknown")})')
+            if len(catalogs) > 10: lines.append(f'… {len(catalogs)-10} more catalogues')
+            if not catalogs: lines.append('Stream / metadata add-on; no browse catalogues declared.')
+        if not sources: lines.append('No catalogue add-ons saved. Add your manifest in Add-ons.')
+        rows = []
+        paging = []
+        if page: paging.append(Button('Previous', callback_data=f'menu:cataloguespage:{page-1}'))
+        if (page+1)*5 < len(sources): paging.append(Button('More', callback_data=f'menu:cataloguespage:{page+1}'))
+        if paging: rows.append(paging)
+        rows.append(navigation())
+        await self.show_panel(message, '\n'.join(lines)[:3900], reply_markup=Markup(rows))

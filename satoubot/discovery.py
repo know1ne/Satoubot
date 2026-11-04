@@ -21,8 +21,6 @@ HDHUB = 'https://hdhub.thevolecitor.qzz.io/eyJ0b3Jib3giOiJ1bnNldCIsInF1YWxpdGllc
 PROVIDER_TIMEOUT = 30
 SEARCH_TIMEOUT = 90
 
-DEFAULT_PROVIDERS = 'https://raw.githubusercontent.com/yoruix/nuvio-providers/refs/heads/main/manifest.json'
-
 
 async def fetch_bytes(url, limit=8_000_000, headers=None):
     if urlparse(url).scheme not in ('https', 'http'):
@@ -45,7 +43,13 @@ async def fetch_json(url):
 def stream_records(items, name):
     found = []
     for item in items[:30]:
-        if not isinstance(item, dict) or not isinstance(item.get('url'), str): continue
+        if not isinstance(item, dict): continue
+        item = dict(item)
+        if not item.get('url') and isinstance(item.get('infoHash'), str):
+            from .torrent import normalize_magnet, TorrentError
+            try: item['url'] = normalize_magnet('magnet:?xt=urn:btih:'+item['infoHash'])[0]
+            except TorrentError: continue
+        if not isinstance(item.get('url'), str): continue
         hints = item.get('behaviorHints') or {}
         headers = (hints.get('proxyHeaders') or {}).get('request', {})
         description = str(item.get('description') or item.get('title') or '')
@@ -118,15 +122,6 @@ class Discovery:
     async def search(self, query):
         results, errors = [], []
         for url, kind, manifest in self.manifests():
-            if kind == 'animepahe':
-                from . import animepahe
-                try:
-                    results.extend(await asyncio.wait_for(animepahe.search(url, query), 45))
-                except animepahe.RateLimitError:
-                    errors.append(manifest.get('name', 'AnimePahe') + ' (rate limited)')
-                except Exception:
-                    errors.append(manifest.get('name', 'AnimePahe'))
-                continue
             if kind != 'addon': continue
             for catalog in manifest.get('catalogs', []):
                 media_type = catalog.get('type')
@@ -138,8 +133,12 @@ class Discovery:
                     data = await fetch_json(urljoin(url, endpoint))
                     for meta in data.get('metas', [])[:20]:
                         if not isinstance(meta, dict) or not meta.get('id') or not meta.get('name'): continue
-                        if any(m['id'] == str(meta['id']) and m.get('type') == media_type for m in results): continue
-                        results.append(dict(meta, id=str(meta['id']), type=media_type, addon=url))
+                        existing = next((m for m in results if m['id'] == str(meta['id']) and m.get('type') == media_type), None)
+                        source = {'name': manifest.get('name', 'Catalogue'), 'catalog': str(catalog['id']), 'url': url}
+                        if existing:
+                            existing.setdefault('catalogue_sources', []).append(source)
+                            continue
+                        results.append(dict(meta, id=str(meta['id']), type=media_type, addon=url, catalogue_sources=[source]))
                 except Exception:
                     errors.append(manifest.get('name', 'Catalogue'))
         normalized = lambda text: ' '.join(re.findall(r'\w+', text.casefold()))
@@ -155,10 +154,6 @@ class Discovery:
             raise ValueError('This catalogue is disabled')
         media_type, item_id = movie.get('type', 'movie'), movie['id']
         manifests = self.manifests()
-        if any(url == movie['addon'] and kind == 'animepahe' for url, kind, _ in manifests):
-            if movie.get('video_id') and movie.get('season') is not None: return movie
-            from . import animepahe
-            return await animepahe.details(movie['addon'], movie)
         candidates = [movie['addon']] + [url for url, kind, manifest in manifests if kind == 'addon' and url != movie['addon'] and supports_resource(manifest, 'meta', media_type, item_id)]
         last_error = None
         for url in candidates:
@@ -171,7 +166,11 @@ class Discovery:
                 # Metadata enrichment must not replace the selected catalogue/episode identity.
                 result = dict(movie, **meta)
                 result['metadata_source'] = url
-                for key in ('id', 'type', 'addon', 'video_id', 'season', 'episode', 'embedded_streams'):
+                if result.get('poster'):
+                    result['artwork_source'] = url if meta.get('poster') else movie.get('artwork_source') or movie['addon']
+                elif result.get('background'):
+                    result['artwork_source'] = url if meta.get('background') else movie.get('artwork_source') or movie['addon']
+                for key in ('id', 'type', 'addon', 'video_id', 'season', 'episode', 'embedded_streams', 'catalogue_sources'):
                     if key in movie: result[key] = movie[key]
                 return result
             except Exception as exc:
@@ -224,14 +223,6 @@ class Discovery:
                 except Exception:
                     return [], name
 
-        async def animepahe_query(url):
-            from . import animepahe
-            try:
-                async with asyncio.timeout(85):
-                    return await animepahe.streams(url, movie), None
-            except Exception:
-                return [], 'AnimePahe (API)'
-
         async def addon_query(url, manifest):
             origin = urlparse(url).netloc.lower()
             limit = addon_limits.setdefault(origin, asyncio.Semaphore(1))
@@ -247,19 +238,7 @@ class Discovery:
             tasks.add(task)
             all_tasks.add(task)
 
-        async def bootstrap(url, label):
-            # Setup never blocks already configured sources from returning results.
-            async with semaphore:
-                try:
-                    async with asyncio.timeout(PROVIDER_TIMEOUT):
-                        await self.add(url)
-                    return url, None
-                except Exception:
-                    return None, f'{label} could not be loaded'
-
         for url, kind, manifest in manifests:
-            if kind == 'animepahe' and movie.get('addon') == url and movie.get('season') is not None:
-                launch(animepahe_query(url))
             if kind == 'addon':
                 if supports_resource(manifest, 'stream', media_type, stream_id):
                     launch(addon_query(url, manifest))
@@ -268,10 +247,6 @@ class Discovery:
                 for p in manifest['scrapers']:
                     if p.get('enabled', True) and provider_type in p.get('supportedTypes', []) and self.enabled(url, p['filename']):
                         launch(query(url, p, kind))
-        if self.store.setting('source_selection_explicit') != '1' and not any(url == HDHUB for url, _, _ in self.manifests(active=False)):
-            launch(bootstrap(HDHUB, 'HdHub add-on'))
-        if self.store.setting('source_selection_explicit') != '1' and not any(kind == 'providers' for _, kind, _ in self.manifests(active=False)):
-            launch(bootstrap(DEFAULT_PROVIDERS, 'Yoru providers'))
         try:
             async with asyncio.timeout(SEARCH_TIMEOUT):
                 while tasks:
@@ -279,17 +254,6 @@ class Discovery:
                     tasks.difference_update(done)
                     for task in done:
                         found, error = await task
-                        if isinstance(found, str):
-                            # A fetched manifest contributes its sources immediately.
-                            for url, kind, manifest in self.manifests():
-                                if url != found: continue
-                                if kind == 'providers':
-                                    for p in manifest['scrapers']:
-                                        if p.get('enabled', True) and provider_type in p.get('supportedTypes', []) and self.enabled(url, p['filename']):
-                                            launch(query(url, p, kind))
-                                elif supports_resource(manifest, 'stream', media_type, stream_id):
-                                    launch(addon_query(url, manifest))
-                            continue
                         fresh = []
                         for item in found or []:
                             if item['url'] not in seen:
