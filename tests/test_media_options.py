@@ -378,7 +378,7 @@ async def test_gui_cancel_stops_metadata_lookup_and_preserves_transfer(bot_conte
     bot.main_menu=AsyncMock()
     try:
         await bot.menu_callback(SimpleNamespace(callback_query=SimpleNamespace(data='menu:cancel',message=MagicMock())),context)
-        assert not bot.panel().tasks and not transfer.done()
+        assert 'torrent' in bot.panel().tasks and not transfer.done()
     finally:
         transfer.cancel();await asyncio.gather(transfer,return_exceptions=True)
 

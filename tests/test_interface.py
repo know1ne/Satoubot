@@ -371,7 +371,7 @@ async def test_latest_command_cancels_only_own_admins_background_lookup(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_stop_cancels_pending_search_and_keeps_transfer(tmp_path):
+async def test_stop_cancels_pending_search_and_transfer(tmp_path):
     bot, message, panel, context, update = setup_bot(tmp_path)
     lookup_started = asyncio.Event()
     lookup_cancelled = asyncio.Event()
@@ -388,10 +388,8 @@ async def test_stop_cancels_pending_search_and_keeps_transfer(tmp_path):
     await lookup_started.wait()
     await latest_command(bot.stop)(update, context)
     assert lookup_cancelled.is_set() and not bot.panel().pending
-    assert 'Stopped your pending command or lookup.' in bot.panel().text
-    assert 'Downloads and uploads continue.' in bot.panel().text
-    assert not transfer_task.done()
-    transfer_release.set(); await transfer_task
+    assert 'Stopped active work' in bot.panel().text
+    assert transfer_task.cancelled() and not bot.transfers_enabled()
 
 
 @pytest.mark.asyncio
@@ -408,13 +406,13 @@ async def test_stop_cancels_active_handler_and_reports_idle_on_repeat(tmp_path):
     await started.wait()
     await latest_command(bot.stop)(update, context)
     assert running.cancelled() and cancelled.is_set()
-    assert bot.panel().text == 'Stopped your pending command or lookup.'
+    assert 'Stopped active work' in bot.panel().text
     await latest_command(bot.stop)(update, context)
-    assert bot.panel().text == 'No command or lookup is running.'
+    assert 'Stopped active work' in bot.panel().text
 
 
 @pytest.mark.asyncio
-async def test_stop_does_not_cancel_another_admins_lookup(tmp_path):
+async def test_stop_cancels_another_admins_lookup(tmp_path):
     bot, message, panel, context, update = setup_bot(tmp_path)
     bot.store.db.execute('INSERT INTO admins VALUES (1234)'); bot.store.db.commit()
     started, release = asyncio.Event(), asyncio.Event()
@@ -426,9 +424,8 @@ async def test_stop_does_not_cancel_another_admins_lookup(tmp_path):
     await admin_session(start_other)(other, context)
     await started.wait()
     await latest_command(bot.stop)(update, context)
-    assert bot.panel().text == 'No command or lookup is running.'
-    assert 'search' in bot.panels[1234].pending
-    release.set(); await asyncio.gather(*bot.discovery_tasks)
+    assert 'Stopped active work' in bot.panel().text
+    assert 'search' not in bot.panels[1234].pending
 
 
 class ChatMessage:

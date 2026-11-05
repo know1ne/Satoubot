@@ -325,11 +325,13 @@ class CatalogueFunctions:
                         card_is_photo = True
                     except Exception:
                         card = await context.bot.send_message(self.admin_id, caption + '\nImage unavailable.', reply_markup=markup)
-                    previous, old_card = panel.message, panel.card
-                    panel.message, panel.card = None, card
+                    previous, old_card, old_preview = panel.message, panel.card, panel.preview
+                    panel.message, panel.card, panel.preview = None, card, None
                     await self._retire_message(panel, previous)
                     if old_card is not previous and old_card is not card:
                         await self._retire_message(panel, old_card)
+                    if old_preview is not previous and old_preview is not old_card and old_preview is not card:
+                        await self._retire_message(panel, old_preview)
                 else:
                     # Pagination may have replaced the card while providers were still loading.
                     card = panel.card
@@ -480,7 +482,7 @@ class CatalogueFunctions:
             if action != 'no':
                 if action == 'yeslocal': stream.setdefault('transfer_options', {})['download_mode'] = 'local'
                 self.active_description = f'Checking {stream.get("filename") or stream["movie"]["name"]}'
-                self.spawn(self.download_choice(context, stream))
+                self.spawn(self.download_choice(context, stream), kind='download', label=f'Download · {stream.get("filename") or stream["movie"]["name"]}', daily_identity=stream['movie'].get('daily_identity'))
             await self.show_panel(q.message, 'Download cancelled.' if action == 'no' else 'Download started. Open Active transfers for progress.')
         elif action == 'movie':
             await self.show_panel(q.message, 'Finding available files and checking sizes…')
@@ -508,7 +510,7 @@ class CatalogueFunctions:
         for _, key, stream in choices[page*4:page*4+4]:
             size=stream.get('size'); size_text=f'{size/1_000_000:.1f} MB' if isinstance(size,(int,float)) else 'size unknown'
             action=('Unavailable' if stream.get('check_status') == 'unavailable' else 'Retry') if key < 0 else ('Torrent' if stream.get('torrent') else 'HLS' if stream.get('hls_candidate') else 'Manual' if stream.get('check_status') == 'manual' else ('Link' if isinstance(size,(int,float)) and size>MAX_DOWNLOAD_BYTES else ('DW' if size else 'Size unknown')))
-            if action == 'DW' and self.transfer_busy(): action = 'Wait (busy)'
+            if action == 'DW' and sum(info['kind'] == 'download' for _, info in self.active_transfers()) >= 2: action = 'Wait (busy)'
             quality=str(stream.get('quality') or stream.get('title') or stream.get('name') or 'quality unknown')[:65]
             rows.append([Button(f'{action} {quality} | {size_text} | {stream.get("file_type","unknown")}'[:120],callback_data=f'{"retryfile" if key < 0 else "file"}:{abs(key)}')])
         navigation=[]
@@ -616,9 +618,15 @@ class CatalogueFunctions:
         suffix = Path(stream.get('filename') or urlparse(url).path).suffix.lower()
         if is_hls: suffix = '.' + stream['hls_format']
         elif suffix not in ('.mp4', '.mkv', '.avi', '.mov', '.webm', '.m4v'): suffix = '.mp4'
+        # Other downloads may have completed the initial check while this
+        # source was being probed. Claim it once, before any further await.
+        duplicate = self.store.db.execute("SELECT jobs.id FROM jobs JOIN settings ON settings.key='job:' || jobs.id || ':identity' WHERE settings.value=? AND jobs.state NOT IN ('failed','cancelled') LIMIT 1", (identity,)).fetchone() if identity else None
+        if duplicate or self.store.find_source(url):
+            await context.bot.send_message(self.admin_id, 'This source is already recorded. Check pending uploads or saved links.'); return
         title = clean_title(movie,stream)
         filename = safe_name(title) + suffix
         job = self.store.create(url, title, filename, size or 0)
+        self.bind_transfer_job(job, f'Download #{job} · {filename}')
         self.save_transfer_options(job, stream.get('transfer_options'))
         if is_hls:
             self.store.set_setting(f'job:{job}:hls', stream['hls_format'])

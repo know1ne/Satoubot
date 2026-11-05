@@ -20,6 +20,8 @@ from telegram.error import TelegramError
 
 from .preferences import PreferenceFunctions, recover_local_jobs
 from .torrent_ui import TorrentFunctions
+from .task_controls import TaskControlFunctions
+from .task_context import transfer_id
 from .store import Store
 from .transfer import safe_name
 from .download import DownloadFunctions
@@ -88,13 +90,15 @@ def latest_command(handler, *, clear_prompt=True):
     return wrapped
 
 
-class Bot(PreferenceFunctions, TorrentFunctions, SourceHistoryFunctions, DailyFunctions, SeriesFunctions, InterfaceFunctions, MenuFunctions, DestinationFunctions, CatalogueFunctions, DownloadFunctions, UploadFunctions, SearchFunctions, GroupManagementFunctions, MigrationFunctions):
+class Bot(TaskControlFunctions, PreferenceFunctions, TorrentFunctions, SourceHistoryFunctions, DailyFunctions, SeriesFunctions, InterfaceFunctions, MenuFunctions, DestinationFunctions, CatalogueFunctions, DownloadFunctions, UploadFunctions, SearchFunctions, GroupManagementFunctions, MigrationFunctions):
     def __init__(self, store, media_dir, admin_id, uploader, upload_parallel_parts=1):
         self.store, self.media_dir, self.owner_id, self.uploader = store, media_dir, admin_id, uploader
         if not 1 <= upload_parallel_parts <= 4:
             raise ValueError('UPLOAD_PARALLEL_PARTS must be between 1 and 4')
         self.upload_parallel_parts = upload_parallel_parts
         self.tasks = set()
+        self.task_info = {}
+        self.task_sequence = 0
         self.last_user_activity = time.monotonic()
         self.last_idle_check = time.monotonic()
 
@@ -109,10 +113,36 @@ class Bot(PreferenceFunctions, TorrentFunctions, SourceHistoryFunctions, DailyFu
         return bool(update.effective_user and self.is_admin(update.effective_user.id)
                     and update.effective_chat and update.effective_chat.type == 'private')
 
-    def spawn(self, coro):
-        task = asyncio.create_task(coro)
+    def spawn(self, coro, *, kind='download', job_id=None, label=None, daily_identity=None):
+        self.task_sequence += 1
+        ident = self.task_sequence
+        info = {'id': ident, 'kind': kind, 'job_id': job_id, 'label': label or kind.title(),
+                'daily_identity': daily_identity, 'owner': self.admin_id, 'started': False}
+        async def run():
+            token = transfer_id.set(ident)
+            info['started'] = True
+            try: return await coro
+            finally: transfer_id.reset(token)
+        task = asyncio.create_task(run())
         self.tasks.add(task)
-        task.add_done_callback(self.tasks.discard)
+        self.task_info[ident] = (task, info)
+        def finished(done):
+            self.tasks.discard(done)
+            self.task_info.pop(ident, None)
+            if not info['started']:
+                coro.close()
+                job = self.store.get(info['job_id']) if info['job_id'] else None
+                if job and job['state'] in ('downloading', 'uploading', 'converting'):
+                    state = 'upload_unknown' if job['state'] == 'uploading' else 'local_only' if job['state'] == 'converting' else 'cancelled'
+                    self.store.update(job['id'], state=state, error='Cancelled before starting', approval_token='')
+        task.add_done_callback(finished)
+        return task
+
+    def bind_transfer_job(self, job_id, label=None):
+        entry = self.task_info.get(transfer_id.get())
+        if entry:
+            entry[1]['job_id'] = job_id
+            if label: entry[1]['label'] = label
 
     def transfers_enabled(self):
         return self.store.setting('transfers_enabled', '1') == '1'
@@ -120,17 +150,24 @@ class Bot(PreferenceFunctions, TorrentFunctions, SourceHistoryFunctions, DailyFu
     def transfer_busy(self):
         return any(not task.done() for task in self.tasks)
 
-    async def transfer_gate(self, message):
+    def active_transfers(self):
+        return [(task, info) for task, info in self.task_info.values() if not task.done()]
+
+    async def transfer_gate(self, message, kind='download'):
         if not self.transfers_enabled():
             await message.reply_text('Transfers are off. Press Start transfers to enable downloads and uploads.')
             return False
-        if self.transfer_busy():
-            await message.reply_text('A transfer is processing. Please wait until it finishes, then try again.')
+        count = sum(info['kind'] == kind for _, info in self.active_transfers())
+        if count >= 2:
+            await message.reply_text(f'Two {kind}s are active. Wait for one to finish, then try again.')
             return False
         return True
 
     async def start(self, update, context):
         if not self.authorized(update): return
+        if self.store.setting('stop_by_command') == '1':
+            self.store.set_setting('transfers_enabled', '1')
+            self.store.set_setting('stop_by_command', '0')
         if context.args and context.args[0].startswith('movie_'):
             try:
                 key = int(context.args[0].split('_', 1)[1])
@@ -156,9 +193,28 @@ class Bot(PreferenceFunctions, TorrentFunctions, SourceHistoryFunctions, DailyFu
 
     async def stop(self, update, context):
         if not self.authorized(update): return
-        text = 'Stopped your pending command or lookup.' if cancelled_command_work.get() else 'No command or lookup is running.'
-        if self.transfer_busy(): text += '\nDownloads and uploads continue.'
+        self.set_transfers(False)
+        self.store.set_setting('stop_by_command', '1')
+        uploading = any(info['kind'] == 'upload' for _, info in self.active_transfers())
+        await self.cancel_work(all_work=True)
+        await self.cancel_daily_scan(context)
+        text = 'Stopped active work. Transfers and Daily Uploads are off.'
+        if uploading: text += '\nCancelled uploads may already have reached Telegram; check the destination before retrying.'
         await self.show_panel(update.message, text, reply_markup=InlineKeyboardMarkup([navigation()]))
+
+    async def cancel_command(self, update, context):
+        if not self.authorized(update): return
+        self.discard_current_confirmation()
+        self.clear_prompt(context)
+        self.panel().prompt.clear()
+        await self.cancel_menu(update.message)
+
+
+    async def announce_startup(self, telegram_bot):
+        try:
+            await telegram_bot.send_message(self.owner_id, "I'm Back")
+        except TelegramError as exc:
+            log.warning('Startup notice failed: %s', type(exc).__name__)
 
     async def chat_shared(self, update, context):
         if not self.authorized(update): return
@@ -226,7 +282,22 @@ class Bot(PreferenceFunctions, TorrentFunctions, SourceHistoryFunctions, DailyFu
     async def callback(self, update, context):
         if not self.authorized(update): return
         q = update.callback_query
+        # Temporary menus and reviews are valid only while they are the current screen.
+        scoped = ('menu:', 'adminremove:', 'addon', 'season:', 'seasons:', 'page:', 'cancelpage:',
+                  'movie:', 'file:', 'retryfile:', 'searchagain', 'yes:', 'yeslocal:', 'no:', 'link:',
+                  'pref:', 'cancelwork:', 'directmanual:', 'directlink:', 'directretry:',
+                  'dl:', 'dllocal:', 'skip:', 'report:', 'upload:', 'thumb:', 'keeplocal:', 'convert:',
+                  'convertmenu:', 'torrentpage:', 'torrentpick:', 'torrentlocal:', 'torrentreview:',
+                  'daily:', 'dest:', 'destcancel', 'choose_dest:')
+        source_message = getattr(q, 'message', None)
+        if isinstance(getattr(source_message, 'message_id', None), int) and q.data.startswith(scoped):
+            panel = self.panel()
+            if not any(self.same_message(source_message, item) for item in (panel.message, panel.card, panel.preview)):
+                await q.answer('This menu has expired. Send /start or /pending.', show_alert=True)
+                return
         await q.answer()
+        if q.data.startswith('cancelwork:'):
+            return await self.cancel_callback(update, context)
         if q.data.startswith('pref:'):
             return await self.preference_callback(update, context)
         if q.data.startswith(('torrentpage:', 'torrentpick:', 'torrentlocal:', 'torrentreview:')):
@@ -240,8 +311,13 @@ class Bot(PreferenceFunctions, TorrentFunctions, SourceHistoryFunctions, DailyFu
                 return await self.preview(context, job_id)
             return
         if q.data.startswith('convertmenu:'):
-            try: job_id = int(q.data.split(':')[1])
-            except ValueError: return
+            try:
+                parts = q.data.split(':'); job_id = int(parts[1])
+            except (ValueError, IndexError): return
+            job = self.store.get(job_id)
+            if not job: return
+            if job['state'] == 'review' and (len(parts) != 3 or parts[2] != job['approval_token']):
+                return await q.message.reply_text('This preview is out of date. Use /pending to open it again.')
             return await self.conversion_menu(context, job_id)
         if q.data.startswith('convert:'):
             try: _, number, selection = q.data.split(':'); job_id = int(number)
@@ -253,7 +329,7 @@ class Bot(PreferenceFunctions, TorrentFunctions, SourceHistoryFunctions, DailyFu
             previous_state = job['state']
             self.store.update(job_id, state='converting', approval_token='')
             self.active_description = f'Converting #{job_id}'
-            self.spawn(self.convert_job(context, job_id, selection, previous_state))
+            self.spawn(self.convert_job(context, job_id, selection, previous_state), kind='download', job_id=job_id, label=f'Converting #{job_id} · {job["filename"]}')
             await self.show_panel(q.message, 'Conversion started. Open Active transfers for progress.')
             return
         if q.data.startswith('daily:'):
@@ -314,7 +390,7 @@ class Bot(PreferenceFunctions, TorrentFunctions, SourceHistoryFunctions, DailyFu
             if action == 'dllocal': self.store.set_setting(f'job:{job_id}:download_mode', 'local')
             self.active_description = f'Downloading #{job_id} · {job["filename"]}'
             self.store.update(job_id, state='downloading')
-            self.spawn(self.perform_download(context, job_id))
+            self.spawn(self.perform_download(context, job_id), kind='download', job_id=job_id, label=f'Download #{job_id} · {job["filename"]}')
             await self.show_panel(q.message, 'Download started. Open Active transfers for progress.')
         elif action == 'upload' and job['state'] == 'review':
             if job['size'] > MAX_BYTES:
@@ -323,7 +399,7 @@ class Bot(PreferenceFunctions, TorrentFunctions, SourceHistoryFunctions, DailyFu
             if len(parts) != 3 or parts[2] != job['approval_token']:
                 await q.message.reply_text('This preview is out of date. Use the latest preview.')
                 return
-            if not await self.transfer_gate(q.message): return
+            if not await self.transfer_gate(q.message, 'upload'): return
             if not target:
                 await self.destination_menu(context,job_id)
                 return
@@ -339,14 +415,14 @@ class Bot(PreferenceFunctions, TorrentFunctions, SourceHistoryFunctions, DailyFu
                 await q.message.reply_text('The bot needs administrator access and permission to post in this destination. Select a channel again.')
                 await self.destination_menu(context,job_id)
                 return
-            if not await self.transfer_gate(q.message): return
+            if not await self.transfer_gate(q.message, 'upload'): return
             current = self.store.get(job_id)
             if not self.authorized(update) or not current or current['state'] != 'review' or current['approval_token'] != parts[2] or current['target'] != target or self.store.setting('target') != target:
                 await q.message.reply_text('This preview is out of date. Use the latest preview.')
                 return
             self.active_description = f'Uploading #{job_id} · {job["filename"]}'
             self.store.update(job_id, state='uploading', approval_token='')
-            self.spawn(self.perform_upload(context, job_id))
+            self.spawn(self.perform_upload(context, job_id), kind='upload', job_id=job_id, label=f'Upload #{job_id} · {job["filename"]}')
             try: await q.edit_message_reply_markup(reply_markup=None)
             except TelegramError: pass
             await self.show_panel(None, 'Upload started. Open Active transfers for progress.', context=context)
@@ -361,7 +437,7 @@ class Bot(PreferenceFunctions, TorrentFunctions, SourceHistoryFunctions, DailyFu
         token = secrets.token_hex(4)
         self.store.update(job_id, target=target, approval_token=token)
         keyboard = InlineKeyboardMarkup([[InlineKeyboardButton('Approve upload', callback_data=f'upload:{job_id}:{token}')],
-                                         [InlineKeyboardButton('Convert format', callback_data=f'convertmenu:{job_id}')],
+                                         [InlineKeyboardButton('Convert format', callback_data=f'convertmenu:{job_id}:{token}')],
                                          [InlineKeyboardButton('Keep locally', callback_data=f'keeplocal:{job_id}:{token}')],
                                          [InlineKeyboardButton('Set thumbnail', callback_data=f'thumb:{job_id}:{token}')],
                                          [InlineKeyboardButton('Select channel', callback_data=f'choose_dest:{job_id}')],
@@ -374,11 +450,14 @@ class Bot(PreferenceFunctions, TorrentFunctions, SourceHistoryFunctions, DailyFu
             try: text += '\n' + track_summary(json.loads(metadata))
             except (ValueError, TypeError): pass
         text = text[:4000]
+        preview_message = None
         if job['thumbnail']:
             with open(job['thumbnail'], 'rb') as photo:
-                await context.bot.send_photo(self.admin_id, photo=photo, caption=text if len(text) <= 1000 else job['filename'], reply_markup=keyboard if len(text) <= 1000 else None)
+                sent = await context.bot.send_photo(self.admin_id, photo=photo, caption=text if len(text) <= 1000 else job['filename'], reply_markup=keyboard if len(text) <= 1000 else None)
+                if len(text) <= 1000: preview_message = sent
         if not job['thumbnail'] or len(text) > 1000:
-            await context.bot.send_message(self.admin_id, text, reply_markup=keyboard)
+            preview_message = await context.bot.send_message(self.admin_id, text, reply_markup=keyboard)
+        await self.register_preview(preview_message)
         # Destination selection is explicit; opening review never forces an upload setup.
 
     async def thumbnail_photo(self, update, context):
@@ -493,6 +572,7 @@ def main():
 
     async def post_init(app):
         await sessions.start()
+        await bot.announce_startup(app.bot)
         bot.cleanup_task = asyncio.create_task(bot.panel_cleaner())
         bot.daily_task = asyncio.create_task(bot.daily_loop(app.bot))
         bot.source_task = asyncio.create_task(bot.idle_source_loop())
@@ -522,6 +602,7 @@ def main():
                    .post_init(post_init).post_shutdown(post_shutdown).build())
     application.add_handler(CommandHandler('start', latest_command(bot.start), block=False))
     application.add_handler(CommandHandler('stop', latest_command(bot.stop), block=False))
+    application.add_handler(CommandHandler('cancel', admin_session(bot.cancel_command), block=False))
     application.add_handler(CommandHandler('status', latest_command(bot.status), block=False))
     application.add_handler(CommandHandler('rename', latest_command(bot.rename), block=False))
     application.add_handler(CommandHandler('find', latest_command(bot.find), block=False))

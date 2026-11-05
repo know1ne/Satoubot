@@ -5,12 +5,14 @@ from dataclasses import dataclass, field
 
 from telegram import InlineKeyboardButton as Button, InlineKeyboardMarkup as Markup
 from telegram.error import BadRequest, TelegramError
+from .task_context import transfer_id
 
 
 @dataclass
 class Panel:
     message: object = None
     card: object = None
+    preview: object = None
     generation: int = 0
     disable_preview: bool = False
     text: str = ''
@@ -18,6 +20,7 @@ class Panel:
     updated: float = field(default_factory=time.monotonic)
     pending: dict = field(default_factory=dict)
     tasks: dict = field(default_factory=dict)
+    task_daily: dict = field(default_factory=dict)
     results: dict = field(default_factory=dict)
     retired: list = field(default_factory=list)
     history: list = field(default_factory=list)
@@ -76,16 +79,19 @@ class InterfaceFunctions:
                     card = await context.bot.send_photo(self.admin_id, photo=text['photo'], caption=text['text'], reply_markup=markup)
                 else:
                     card = await context.bot.send_message(self.admin_id, text['text'], reply_markup=markup)
-                old_message, old_card = panel.message, panel.card
-                panel.message, panel.card = None, card
+                old_message, old_card, old_preview = panel.message, panel.card, panel.preview
+                panel.message, panel.card, panel.preview = None, card, None
                 panel.generation += 1
                 if old_message is not card: await self._retire_message(panel, old_message)
                 if old_card is not old_message and old_card is not card: await self._retire_message(panel, old_card)
+                if old_preview is not old_message and old_preview is not old_card and old_preview is not card: await self._retire_message(panel, old_preview)
             return
         await self.show_panel(message, text, markup, remember=False, disable_preview=disable_preview)
 
     async def panel_status(self, context, key, label=None):
         panel = self.panel()
+        ident = transfer_id.get()
+        if key == 'transfer' and ident is not None: key = f'transfer:{ident}'
         async with panel.lock:
             if label:
                 panel.pending[key] = label
@@ -142,16 +148,31 @@ class InterfaceFunctions:
             panel.message = None
         previous = panel.message
         card = panel.card
+        preview = panel.preview
         if message is not None:
             new_message = await message.reply_text(text, reply_markup=markup, do_quote=False, **preview_options)
         elif context is not None:
             new_message = await context.bot.send_message(self.admin_id, text, reply_markup=markup, **preview_options)
         else:
             return
-        panel.message, panel.card = new_message, None
+        panel.message, panel.card, panel.preview = new_message, None, None
         if fresh: panel.generation += 1
         if previous is not new_message: await self._retire_message(panel, previous)
         if card is not previous and card is not new_message: await self._retire_message(panel, card)
+        if preview is not previous and preview is not card and preview is not new_message: await self._retire_message(panel, preview)
+
+    async def register_preview(self, message):
+        panel = self.panel()
+        async with panel.lock:
+            old = (panel.message, panel.card, panel.preview)
+            if panel.message is not None and panel.text:
+                panel.history.append((panel.text, panel.markup, panel.prompt.copy(), panel.disable_preview))
+                panel.history = panel.history[-10:]
+            panel.message, panel.card, panel.preview = None, None, message
+            panel.generation += 1
+            for previous in old:
+                if previous is not None and previous is not message:
+                    await self._retire_message(panel, previous)
 
     async def panel_task(self, key, factory, context):
         """Expose work beneath whichever menu is currently open, without blocking navigation."""
@@ -168,6 +189,7 @@ class InterfaceFunctions:
         finally:
             async with panel.lock:
                 panel.tasks.pop(key, None)
+                panel.task_daily.pop(key, None)
                 panel.pending.pop(key, None)
                 if panel.message is not None:
                     try:
@@ -175,13 +197,14 @@ class InterfaceFunctions:
                     except TelegramError:
                         pass
 
-    async def start_panel_task(self, key, label, factory, context):
+    async def start_panel_task(self, key, label, factory, context, *, daily_identity=None):
         panel = self.panel()
         if key in panel.pending:
             async with panel.lock:
                 await self._render_panel(panel, context=context)
             return
         panel.pending[key] = label
+        if daily_identity: panel.task_daily[key] = daily_identity
         if not panel.text:
             panel.text = 'Choose another action while this request finishes.'
         try:
@@ -189,6 +212,7 @@ class InterfaceFunctions:
                 await self._render_panel(panel, context=context)
         except BaseException:
             panel.pending.pop(key, None)
+            panel.task_daily.pop(key, None)
             raise
         panel.tasks[key] = self.launch_discovery(self.panel_task(key, factory, context))
 
@@ -201,6 +225,7 @@ class InterfaceFunctions:
         for key, task in list(panel.tasks.items()):
             if task.done():
                 panel.tasks.pop(key, None)
+                panel.task_daily.pop(key, None)
                 panel.pending.pop(key, None)
         return len(tasks)
 
@@ -211,7 +236,7 @@ class InterfaceFunctions:
                 if now - panel.updated < 300 or panel.pending:
                     continue
                 remaining = []
-                for message in panel.retired + ([panel.message] if panel.message is not None else []) + ([panel.card] if panel.card is not None else []):
+                for message in panel.retired + ([panel.message] if panel.message is not None else []) + ([panel.card] if panel.card is not None else []) + ([panel.preview] if panel.preview is not None else []):
                     try:
                         await message.delete()
                     except TelegramError:
@@ -223,6 +248,7 @@ class InterfaceFunctions:
                         remaining.append(message)
                 panel.message = None
                 panel.card = None
+                panel.preview = None
                 panel.generation += 1
                 panel.retired = remaining[-2:]
                 panel.text, panel.markup = '', None

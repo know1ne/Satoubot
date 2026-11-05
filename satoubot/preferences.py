@@ -90,8 +90,7 @@ class PreferenceFunctions:
             notice += '\nDownload only. No upload started.'
             rows = []
             if size <= MAX_BYTES: rows.append([Button('Review Telegram upload', callback_data=f'localreview:{job_id}')])
-            rows.append(navigation())
-            await context.bot.send_message(self.admin_id, notice[:4000], reply_markup=Markup(rows))
+            await context.bot.send_message(self.admin_id, notice[:4000], reply_markup=Markup(rows) if rows else None)
         else:
             await context.bot.send_message(self.admin_id, notice[:4000])
             await self.preview(context, job_id)

@@ -100,7 +100,7 @@ class TorrentFunctions:
         self.save_transfer_options(job_id, {'download_mode':'local' if action == 'torrentlocal' else 'review'})
         self.store.update(job_id, state='downloading')
         self.active_description = f'Torrent download #{job_id} · {entry["name"][-100:]}'
-        self.spawn(self.perform_torrent(context, job_id, metadata, index))
+        self.spawn(self.perform_torrent(context, job_id, metadata, index), kind='download', job_id=job_id, label=f'Torrent #{job_id} · {entry["name"][-80:]}')
         await self.show_panel(update.callback_query.message, 'Torrent download started. Open Active transfers for progress.')
 
     async def perform_torrent(self, context, job_id, metadata, index):

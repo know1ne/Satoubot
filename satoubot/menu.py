@@ -12,7 +12,7 @@ class MenuFunctions:
             context.user_data.pop(key, None)
 
     async def main_menu(self, message):
-        busy = self.transfer_busy()
+        busy = sum(info['kind'] == 'download' for _, info in self.active_transfers()) >= 2
         state = 'on' if self.transfers_enabled() else 'off'
         rows = [[Button('Download' + (' (busy)' if busy else ''), callback_data='menu:download'), Button('Upload approvals', callback_data='menu:pending')],
                 [Button('Add-ons', callback_data='menu:addons'), Button('Saved files / links', callback_data='menu:saved')],
@@ -32,12 +32,12 @@ class MenuFunctions:
         await self.show_panel(message, f'Owner: {self.owner_id}\nAdmins: ' + (', '.join(map(str, ids)) or 'none'), reply_markup=Markup(rows))
 
     async def active_menu(self, message):
-        tasks = [task for task in self.tasks if not task.done()]
+        active = self.active_transfers()
         rows = [[Button('Refresh', callback_data='menu:active')]]
-        if tasks: rows.append([Button('Cancel transfer', callback_data='menu:canceltransfer')])
+        if active or self.lookup_tasks(): rows.append([Button('Cancel tasks', callback_data='menu:canceltransfer')])
         rows.append(navigation())
-        label = getattr(self, 'active_description', 'Transfer in progress') if tasks else 'No active transfers.'
-        await self.show_panel(message, label, reply_markup=Markup(rows))
+        lines = [info['label'] for _, info in active]
+        await self.show_panel(message, 'Active transfers\n' + ('\n'.join(lines) if lines else 'No active transfers.'), reply_markup=Markup(rows))
 
     async def menu_callback(self, update, context):
         q=update.callback_query; action=q.data.split(':',1)[1]
@@ -81,8 +81,12 @@ class MenuFunctions:
             rows.append(navigation())
             self.panel().results.pop(key, None)
             return await self.show_panel(q.message, result['text'], reply_markup=Markup(rows))
-        if action in ('main','cancel'):
-            if action == 'cancel': await self.cancel_panel_tasks()
+        if action == 'cancel':
+            self.discard_current_confirmation()
+            self.clear_prompt(context)
+            self.panel().prompt.clear()
+            return await self.cancel_menu(q.message)
+        if action == 'main':
             self.clear_prompt(context)
             await self.main_menu(q.message);return
         if action in ('sourcehistory', 'sourcehistorytoggle'):
@@ -106,13 +110,7 @@ class MenuFunctions:
         if action == 'settings': return await self.settings_menu(q.message)
         if action == 'daily': return await self.daily_menu(q.message, context)
         if action == 'active': return await self.active_menu(q.message)
-        if action == 'canceltransfer':
-            active=[t for t in self.tasks if not t.done()]
-            if active:
-                for task in active: task.cancel()
-                await self.show_panel(q.message, 'Cancellation requested. An upload may already have reached Telegram; check the destination before retrying.')
-            else: await self.show_panel(q.message, 'No active transfers.')
-            return await self.active_menu(q.message)
+        if action == 'canceltransfer': return await self.cancel_menu(q.message)
         if action == 'admins': return await self.admin_menu(q.message, update.effective_user.id)
         if action == 'addadmin':
             if update.effective_user.id != self.owner_id:
@@ -125,7 +123,7 @@ class MenuFunctions:
         self.clear_prompt(context)
         proxy=SimpleNamespace(message=q.message,effective_user=update.effective_user,effective_chat=update.effective_chat)
         if action == 'download':
-            text='A transfer is active. Wait before starting another.' if self.transfer_busy() else 'Send a direct HTTP(S) media link, magnet link, or .torrent document.'
+            text='Send a direct HTTP(S) media link, magnet link, or .torrent document.'
             await self.show_panel(q.message, text,reply_markup=Markup([navigation()]));return
         if action == 'library':
             context.user_data['search_pending']=True

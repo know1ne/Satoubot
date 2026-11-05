@@ -62,7 +62,13 @@ Send a magnet link, a public HTTP(S) `.torrent` URL, or a `.torrent` document un
 
 The aria2 process is owned by the current task and uses DHT/peer exchange for public v1/hybrid torrents (piece size up to 16 MiB). Trackers, web seeds, external metadata URLs, and private tracker credentials are discarded. Private torrents and v2-only torrents are unsupported. Availability depends on reachable peers and WSL/network configuration. Torrent mode intentionally opens peer-to-peer networking; the HTTP downloader retains its separate public-destination checks. Normal BitTorrent piece sharing can occur during download, capped at 64 KiB/s; continued seeding is disabled after completion. No RPC server is exposed. Selecting one file can also require adjacent pieces from another file; the task disk limit includes a bounded allowance for those pieces. Status reports approximate disk bytes written. Cancellation terminates that aria2 process and removes incomplete content for that task.
 
-**Back**, **Cancel**, and **Main menu** remain available. **Cancel** and `/stop` cancel temporary lookups/metadata work; transfers continue. Use **Active transfers → Cancel transfer** to cancel an actual download, conversion, or upload. Settings remain local; Telegram is the only upload destination.
+<!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:7cbfacfec1e8f1fd7363352e85a8ced9318eaa29ffb05a7cd81a273015a0ff2a -->
+
+**Back** returns to the previous screen. **Cancel** or `/cancel` lists active work and lets you cancel one or all tasks; **Active transfers** has the same controls. `/stop` cancels active work and turns transfers and Daily Uploads off; `/start` opens the menu and re-enables transfers after `/stop`, while Daily Uploads must be started separately. A cancelled upload may already be in Telegram: check the destination before retrying. Settings remain local; Telegram is the only upload destination.
+
+<!-- /coderabbit-ai-generated:v1 -->
 
 The implementation was informed by the settings, selection and local-download flows in [mirror-leech-telegram-bot](https://github.com/anasty17/mirror-leech-telegram-bot). It uses SatouBot's existing modules and approval model. Existing group, daily-upload and migration features are retained; no new external upload service or catalogue was added.
 
@@ -121,7 +127,13 @@ Supported HLS downloads accept finite, unencrypted MPEG-TS and fragmented MP4 pl
 
 <!-- coderabbit-ai-generated-section:v1:675c83f5183d875588f3d81796be3aa30c1a10896f4dcfcf12d1d4bf605fd0e8 -->
 
-For direct files, it stops if a source ignores the range.
+<!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:a506f5920b32e3efc6eb80b2c175efdfc089eb0201376485ed363211dd5ae582 -->
+
+Direct files must still pass the initial small-range check. If a server later ignores parallel ranges while returning the same strong validator, the bot retries with one connection and verifies that validator and the exact size. A changed or missing validator stops the retry.
+
+<!-- /coderabbit-ai-generated:v1 -->
 
 <!-- /coderabbit-ai-generated:v1 --> <!-- coderabbit-ai-generated:v1 -->
 
@@ -149,9 +161,21 @@ The MTProto uploader uses Telethon's standard uploader by default. An experiment
 
 <!-- coderabbit-ai-generated-section:v1:c1e59b9411bb3c153bf6f6bab780accf4529ece171cfb3015681456d2efe2204 -->
 
-Send `/start` to remove the old bottom keyboard and open the inline menu. Send a movie title in the private chat to search. Use **Admin management** to list, add or remove numeric Telegram user IDs; only the configured owner can change admins, and the list is stored in the database. Each admin must start a private chat with the bot.
+<!-- coderabbit-ai-generated:v1 -->
 
-Use **Start transfers** and **Stop transfers** to allow or block new downloads and uploads. The setting persists across restarts. One transfer runs at a time, and menus and searches remain usable during it. **Active transfers** shows and cancels the current transfer. A cancelled or failed upload may already be present on Telegram: inspect the destination before retrying. A running transfer finishes when transfers are switched off. Uploads still require individual approval.
+<!-- coderabbit-ai-generated-section:v1:22444b2b98b2fbf4c6319ce3ff37b0ec139aa707ce526b600302b63998355c5a -->
+
+When the bot starts, it sends “I'm Back” to the owner if Telegram permits messages to that chat. Send `/start` to remove the old bottom keyboard and open the inline menu.
+
+<!-- /coderabbit-ai-generated:v1 --> Send a movie title in the private chat to search. Use **Admin management** to list, add or remove numeric Telegram user IDs; only the configured owner can change admins, and the list is stored in the database. Each admin must start a private chat with the bot.
+
+<!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:6c27e94bd3cbfcb8417e853e89af7c062568d3bbc2c5680840d10c7d755e3ead -->
+
+Use **Start transfers** and **Stop transfers** to allow or block new downloads and uploads. The switch persists across restarts and lets already running transfers finish. Up to two downloads and two uploads can run at the same time; conversions use download slots. Additional transfers must wait for a slot. **Active transfers** and `/cancel` list individual tasks and offer cancellation. `/stop` cancels all active work and switches transfers and Daily Uploads off. A cancelled or failed upload may already be present on Telegram: inspect the destination before retrying. Uploads still require individual approval.
+
+<!-- /coderabbit-ai-generated:v1 -->
 
 <!-- /coderabbit-ai-generated:v1 --> <!-- coderabbit-ai-generated:v1 -->
 
@@ -177,7 +201,13 @@ Use **Start transfers** and **Stop transfers** to allow or block new downloads a
 
 <!-- coderabbit-ai-generated-section:v1:f362dec3c7caa0fd73ba2a9a73d93311fa8cd60c1e7af945d1e1a2616d4f69bf -->
 
-Each command or menu navigation sends a fresh menu at the bottom of the chat and removes the preceding menu where Telegram permits. A new command or text message cancels that admin’s earlier temporary searches and file checks. Use `/stop` to cancel your current command or lookups; downloads and uploads continue. While navigating, pending checks and transfer status appear on the current menu, and search results load there or appear as a Results button. Background progress may update the current menu; download and upload progress messages are separate.
+<!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:64590d565ac56e34e169dd44c413dbcc8d88dd8fd37054205e0688a1b799c688 -->
+
+Each command or menu navigation sends a fresh menu at the bottom of the chat and removes the preceding menu where Telegram permits. Old menus and approval previews cannot be used after a newer screen replaces them. A new command or text message cancels that admin’s earlier temporary searches and file checks. `/cancel` offers individual and all-task cancellation; `/stop` cancels all work, including downloads and uploads. `/start` opens the menu and re-enables ordinary transfers after `/stop`. While navigating, pending checks and transfer status appear on the current menu, and search results load there or appear as a Results button. Background progress may update the current menu; download and upload progress messages are separate.
+
+<!-- /coderabbit-ai-generated:v1 -->
 
 <!-- /coderabbit-ai-generated:v1 -->
 
@@ -229,7 +259,13 @@ Only manifests you explicitly saved are queried. No extra catalogue or provider 
 
 
 
-<!-- /coderabbit-ai-generated:v1 -->Availability depends on the selected catalogue supplying episode metadata and a source supporting that title. Downloads remain individually confirmed, one transfer at a time; automatic whole-season queues are not implemented.
+<!-- /coderabbit-ai-generated:v1 --><!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:7d7e571d562c0f9b0b02992c051280822b2b9cff5d094affb096728e84ce8dde -->
+
+Availability depends on the selected catalogue supplying episode metadata and a source supporting that title. Downloads remain individually confirmed, with up to two downloads and two uploads concurrently; automatic whole-season queues are not implemented.
+
+<!-- /coderabbit-ai-generated:v1 -->
 
 Download, upload, search, group management, migration and user session code are in separate modules.
 
@@ -261,7 +297,13 @@ One release is offered at a time. Only verified files strictly below 2,000,000,0
 
 <!-- coderabbit-ai-generated-section:v1:bf898b0397f1592d51a9d435a4fa2962be03b8da2f94724b62d06f0b88d44f61 -->
 
-Daily selections, skipped/no-file titles, title IDs and conservative title/year duplicate checks persist. The next release is checked after upload/skip; a catalogue scan with no candidates waits ten minutes. A failed or uncertain transfer is marked for attention and is never retried automatically. A pending release can be reopened or skipped from Daily Uploads after restart. At the daily quota the bot switches Transfers off; explicitly start another cycle on a later day. Stop transfers prevents new downloads/uploads; already running transfers can finish. Counts use UTC. This is an approval-driven cycle: it cannot publish 4–10 files without your approvals.
+<!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:24dbffeeaff85135c2a25b11446e5756eae7113726d9c8e741f00ffd6e9853c4 -->
+
+Daily selections, skipped/no-file titles, title IDs and conservative title/year duplicate checks persist. Daily Uploads offers **Cancel one** and **Cancel all daily**. Cancelling one daily item skips it and permits the next; an upload whose outcome is uncertain is marked for attention and is never automatically retried. Cancel all daily stops the daily cycle without cancelling unrelated manual transfers. A catalogue scan with no candidates waits ten minutes. At the daily quota the bot switches Transfers off; explicitly start another cycle later. Counts use UTC, and each Telegram upload still needs approval.
+
+<!-- /coderabbit-ai-generated:v1 -->
 
 ### Source history
 

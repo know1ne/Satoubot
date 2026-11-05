@@ -3,6 +3,7 @@ import time
 import logging
 import json
 from pathlib import Path
+import httpx
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
@@ -14,6 +15,26 @@ from .hls import download_hls, inspect_hls, HLSError
 from .transfer import MAX_BYTES, MAX_DOWNLOAD_BYTES, download, filename_from_url, inspect_url, safe_name
 
 log = logging.getLogger("satoubot")
+
+def download_error_reason(error):
+    if isinstance(error, BaseExceptionGroup):
+        for child in error.exceptions:
+            result = download_error_reason(child)
+            if result != 'Check the source and search again to retry': return result
+    if isinstance(error, HLSError): return str(error)
+    if isinstance(error, httpx.HTTPStatusError):
+        return f'Source returned HTTP {error.response.status_code}'
+    if isinstance(error, (httpx.TimeoutException, TimeoutError)):
+        return 'The source timed out'
+    if isinstance(error, httpx.NetworkError): return 'The source connection failed'
+    known = {'Source did not honor the requested byte range.',
+             'Source changed before the single connection retry.',
+             'Source exceeded its byte range.', 'Source sent an incomplete byte range.',
+             'The downloaded size does not match the advertised size.',
+             'Download exceeded its reported size or the 10 GB local limit.'}
+    if isinstance(error, ValueError) and str(error) in known: return str(error)
+    return 'Check the source and search again to retry'
+
 
 class DownloadFunctions:
     async def handle_source(self, update, text):
@@ -141,7 +162,7 @@ class DownloadFunctions:
             if message:
                 try: await message.edit_text(f'Download failed: {original}. Search again to retry.')
                 except Exception: pass
-            reason = str(exc) if isinstance(exc, HLSError) else 'Check the source and search again to retry'
+            reason = download_error_reason(exc)
             await context.bot.send_message(self.admin_id, f'Download #{job_id} failed: {reason}.')
             return
         finally:
