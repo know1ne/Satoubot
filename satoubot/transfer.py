@@ -84,11 +84,28 @@ async def download(url, destination: Path, expected_size: int, progress, connect
     headers = {**(headers or {}), 'Accept-Encoding': 'identity'}
     async with httpx.AsyncClient(transport=PublicTransport(), follow_redirects=True, max_redirects=5, timeout=httpx.Timeout(60, connect=30), trust_env=False) as client:
         head = await client.head(url, headers=headers)
-        head.raise_for_status()
-        validator_header = 'etag' if head.headers.get('etag') else 'last-modified'
-        validator = head.headers.get(validator_header)
-        if (not validator or validator.startswith('W/') or head.headers.get('content-length') != str(expected_size)
-                or head.headers.get('accept-ranges', '').lower() != 'bytes'):
+        if head.status_code in (401, 403, 405, 501):
+            # A signed GET URL may deliberately forbid HEAD. Verify an exact,
+            # bounded range instead; retain the same public transport and limits.
+            async with client.stream('GET', url, headers={**headers, 'Range': 'bytes=0-0', 'Accept-Encoding': 'identity'}) as sample:
+                sample.raise_for_status()
+                if (sample.status_code != 206 or sample.headers.get('content-range') != f'bytes 0-0/{expected_size}'
+                        or sample.headers.get('content-encoding', 'identity').lower() != 'identity'):
+                    raise ValueError('Source did not provide the expected byte range and size.')
+                count = 0
+                async for chunk in sample.aiter_raw(chunk_size=1):
+                    count += len(chunk)
+                    if count > 1: break
+                if count != 1: raise ValueError('Source sent an incomplete byte range.')
+                validator_header = 'etag' if sample.headers.get('etag') else 'last-modified'
+                validator = sample.headers.get(validator_header)
+        else:
+            head.raise_for_status()
+            validator_header = 'etag' if head.headers.get('etag') else 'last-modified'
+            validator = head.headers.get(validator_header)
+            if head.headers.get('content-length') != str(expected_size) or head.headers.get('accept-ranges', '').lower() != 'bytes':
+                return await download_sequential(url, destination, expected_size, progress, headers=headers)
+        if not validator or validator.startswith('W/'):
             return await download_sequential(url, destination, expected_size, progress, headers=headers)
         temporary = destination.with_suffix(destination.suffix + '.part')
         count = min(max(1, connections), 8, expected_size)

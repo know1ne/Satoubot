@@ -27,7 +27,8 @@ def download_error_reason(error):
     if isinstance(error, (httpx.TimeoutException, TimeoutError)):
         return 'The source timed out'
     if isinstance(error, httpx.NetworkError): return 'The source connection failed'
-    known = {'Source did not honor the requested byte range.',
+    known = {'Source did not provide the expected byte range and size.',
+             'Source did not honor the requested byte range.',
              'Source changed before the single connection retry.',
              'Source exceeded its byte range.', 'Source sent an incomplete byte range.',
              'The downloaded size does not match the advertised size.',

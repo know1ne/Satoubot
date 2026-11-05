@@ -131,7 +131,13 @@ Supported HLS downloads accept finite, unencrypted MPEG-TS and fragmented MP4 pl
 
 <!-- coderabbit-ai-generated-section:v1:a506f5920b32e3efc6eb80b2c175efdfc089eb0201376485ed363211dd5ae582 -->
 
-Direct files must still pass the initial small-range check. If a server later ignores parallel ranges while returning the same strong validator, the bot retries with one connection and verifies that validator and the exact size. A changed or missing validator stops the retry.
+<!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:9a48d70679783e1fea8457cd73f20092f3c455bf60d5dc5a283cfb2ac729692a -->
+
+Direct files must still pass the initial small-range check. If a signed GET link rejects HEAD, the bot checks an exact one-byte range and the expected size before downloading. If a server later ignores parallel ranges while returning the same strong validator, the bot retries with one connection and verifies that validator and the exact size. A changed or missing validator stops the retry.
+
+<!-- /coderabbit-ai-generated:v1 -->
 
 <!-- /coderabbit-ai-generated:v1 -->
 
